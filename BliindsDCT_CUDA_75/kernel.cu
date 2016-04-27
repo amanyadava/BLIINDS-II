@@ -132,7 +132,7 @@ __global__ void dct55(const float* rearr_img, const double* dctmtx, float* dctIm
 	for (int i = 0; i < 5; i++) {
 		temp += img[5 * (x / 5) + i] * dct[5 * (x % 5) + i];
 	}
-	dctImg[y * 25 + x] = temp; //fabsf(temp) > 0.0000001 ? temp : 0;
+	dctImg[y * 25 + x/*5*(x%5) + x/5*/] = temp; //fabsf(temp) > 0.0000001 ? temp : 0;
 	//__syncthreads();
 	/*if (x == 0) {
 		if (y == 7155) {
@@ -525,27 +525,31 @@ __global__ void oriented_dct_rho(float const * d_dctImg, float * ori_rho, int or
 	}
 	else if (orient == 2) {
 		if (x == 0) {
-			dctBlock[0] = fabs(d_dctImg[blockIdx.x * 25 + 6]);
-			dctBlock[1] = fabs(d_dctImg[blockIdx.x * 25 + 12]);
-			dctBlock[2] = fabs(d_dctImg[blockIdx.x * 25 + 17]);
-			dctBlock[3] = fabs(d_dctImg[blockIdx.x * 25 + 13]);
-			dctBlock[4] = fabs(d_dctImg[blockIdx.x * 25 + 18]);
-			dctBlock[5] = fabs(d_dctImg[blockIdx.x * 25 + 23]);
-			dctBlock[6] = fabs(d_dctImg[blockIdx.x * 25 + 19]);
-			dctBlock[7] = fabs(d_dctImg[blockIdx.x * 25 + 24]);
+			dctBlock[0] = fabsf(d_dctImg[blockIdx.x * 25 + 6]);
+			dctBlock[1] = fabsf(d_dctImg[blockIdx.x * 25 + 12]);
+			dctBlock[2] = fabsf(d_dctImg[blockIdx.x * 25 + 17]);
+			dctBlock[3] = fabsf(d_dctImg[blockIdx.x * 25 + 13]);
+			dctBlock[4] = fabsf(d_dctImg[blockIdx.x * 25 + 18]);
+			dctBlock[5] = fabsf(d_dctImg[blockIdx.x * 25 + 23]);
+			dctBlock[6] = fabsf(d_dctImg[blockIdx.x * 25 + 19]);
+			dctBlock[7] = fabsf(d_dctImg[blockIdx.x * 25 + 24]);
 		}
 	}
 	else if (orient == 3) {
 		if (x == 0) {
-			dctBlock[0] = fabs(d_dctImg[blockIdx.x * 25 + 5]);
-			dctBlock[1] = fabs(d_dctImg[blockIdx.x * 25 + 10]);
-			dctBlock[2] = fabs(d_dctImg[blockIdx.x * 25 + 15]);
-			dctBlock[3] = fabs(d_dctImg[blockIdx.x * 25 + 20]);
-			dctBlock[4] = fabs(d_dctImg[blockIdx.x * 25 + 11]);
-			dctBlock[5] = fabs(d_dctImg[blockIdx.x * 25 + 16]);
-			dctBlock[6] = fabs(d_dctImg[blockIdx.x * 25 + 21]);
-			dctBlock[7] = fabs(d_dctImg[blockIdx.x * 25 + 22]);
+			dctBlock[0] = fabsf(d_dctImg[blockIdx.x * 25 + 5]);
+			dctBlock[1] = fabsf(d_dctImg[blockIdx.x * 25 + 10]);
+			dctBlock[2] = fabsf(d_dctImg[blockIdx.x * 25 + 15]);
+			dctBlock[3] = fabsf(d_dctImg[blockIdx.x * 25 + 20]);
+			dctBlock[4] = fabsf(d_dctImg[blockIdx.x * 25 + 11]);
+			dctBlock[5] = fabsf(d_dctImg[blockIdx.x * 25 + 16]);
+			dctBlock[6] = fabsf(d_dctImg[blockIdx.x * 25 + 21]);
+			dctBlock[7] = fabsf(d_dctImg[blockIdx.x * 25 + 22]);
 		}
+	}
+	for (int i = 0; i < 8; i++) {
+		if (dctBlock[i] < 0.0001)
+			dctBlock[i] = 0;
 	}
 	double mean = 0.0, std_gauss = 0.0;
 	if (x == 0) {
@@ -562,7 +566,7 @@ __global__ void oriented_dct_rho(float const * d_dctImg, float * ori_rho, int or
 			std_gauss += temp * temp;
 		}
 		std_gauss = sqrt(std_gauss / 7.0);
-		ori_rho[y] = std_gauss / (mean + 0.00000001);
+		ori_rho[y] = std_gauss / (mean + 0.00001);
 		/*if (y == 7155) {
 			printf("mean = %0.20f, std_gauss = %0.20f\nori[i] = %0.20f\n", mean, std_gauss, std_gauss / (mean + 0.00000001));
 		}*/
@@ -953,21 +957,21 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	downsample_by2 << <256, 256 >> >(d_in_convolve_L2, 512, d_in_L2);
 	pad << <261, 261 >> >(d_in_L2, 256, d_in_pad_L2);
 
-	//h_dctImg = (float*)malloc(512 * 512 * sizeof(float));
-	
-	/*
-	cudaMemcpy(h_dctImg, d_in_convolve_L2, 512 * 512 * sizeof(float), cudaMemcpyDeviceToHost);
+	/*float * h_dctImg = (float*)malloc(square * sizeof(float));
+
+
+	cudaMemcpy(h_dctImg, d_in_convolve_L2, square * sizeof(float), cudaMemcpyDeviceToHost);
 	std::ofstream outfile3("convolve_L2GPU.txt");
-	for (int j = 0; j < 512 * 512; j++) {
+	for (int j = 0; j < square; j++) {
 		//for (int i = 0; i < 5; i++) {
 		outfile3 << h_dctImg[j];
 		//if ((i + 1) % 5 == 0){
 		//}
 		//}
 		outfile3 << std::endl;
-	}	
+	}
 	outfile3.close();
-
+	
 	cudaMemcpy(h_dctImg, d_in_L2, 256 * 256 * sizeof(float), cudaMemcpyDeviceToHost);
 	std::ofstream outfile2("d_in_L2GPU.txt");
 	for (int j = 0; j < 256 * 256; j++) {
@@ -1007,13 +1011,32 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L2, 3);
 	oriented_dct_final << <square, 1 >> >(d_ori1_rho_L2, d_ori2_rho_L2, d_ori3_rho_L2, d_ori_rho_L2);
 	
-	/*float * h_dctImg = (float*)malloc(square * sizeof(float));
-	cudaMemcpy(h_dctImg, d_ori_rho_L2, square * sizeof(float), cudaMemcpyDeviceToHost);
-	std::ofstream outfile3("d_ori_L2_babyJPG.txt");
+	/*float * h_dctImg = (float*)malloc(square * 25 * sizeof(float));
+	cudaMemcpy(h_dctImg, d_dctImg, square * 25 * sizeof(float), cudaMemcpyDeviceToHost);
+	std::ofstream outfile3("d_dctImg_L2_babyJPG.txt");
 	for (int j = 0; j < square; j++) {
-		outfile3 << h_dctImg[j] << std::endl;
+		for (int i = 0; i < 25; i++) {
+			outfile3 << h_dctImg[j * 25 + i] << ",";
+			if ((i + 1) % 5 == 0)
+				outfile3 << std::endl;
+		}
+		outfile3 << std::endl;
 	}
 	outfile3.close();*/
+
+	/*cudaMemcpy(h_dctImg, d_ori2_rho_L2, square * sizeof(float), cudaMemcpyDeviceToHost);
+	std::ofstream outfile4("d_ori2_L2_babyJPG.txt");
+	for (int j = 0; j < square; j++) {
+		outfile4 << h_dctImg[j] << std::endl;
+	}
+	outfile4.close();
+
+	cudaMemcpy(h_dctImg, d_ori3_rho_L2, square * sizeof(float), cudaMemcpyDeviceToHost);
+	std::ofstream outfile5("d_ori3_L2_babyJPG.txt");
+	for (int j = 0; j < square; j++) {
+		outfile5 << h_dctImg[j] << std::endl;
+	}
+	outfile5.close();*/
 
 	thrust::sort(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square);
 	mean10_size = ceil((square) / 10.0);
@@ -1136,7 +1159,7 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	std::cout << "gama_l3: " << features[18] << ", " << features[19] << std::endl;
 	std::cout << "freq_bands_l3: " << features[20] << ", " << features[21] << std::endl;
 	std::cout << "ori_rho_l3: " << features[22] << ", " << features[23] << std::endl;
-	*/
+	
 	printf("coeff_freq_var_l1: %0.15f, %0.15f\n", features[0], features[1]);
 	printf("gama_dct_l1: %0.15f, %0.15f\n", features[2], features[3]);
 	printf("freq_bands: %0.15f, %0.15f\n", features[4], features[5]);
@@ -1149,7 +1172,7 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	printf("gama_l3: %0.15f, %0.15f\n", features[18], features[19]);
 	printf("freq_bands_l3: %0.15f, %0.15f\n", features[20], features[21]);
 	printf("ori_rho_l3: %0.15f, %0.15f\n", features[22], features[23]);
-	
+	*/
 	cudaFree(d_ori1_rho_L3);
 	cudaFree(d_ori2_rho_L3);
 	cudaFree(d_ori3_rho_L3);
@@ -1164,6 +1187,22 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	cudaFree(d_rearr_in_L3);
 	
 	cudaFree(d_in);
+
+	/*float feat[8][3] = { 1.808551723070709, 1.518750988440191, 1.426206740617924,
+		3.545643166198175, 2.659656077505682, 2.646690920712334,
+		1.206939434355863, 0.784996619794482, 0.901723093564089,
+		0.310507692307697, 0.354535135135135, 0.345540540540540,
+		0.886170953042489, 0.897903240956246, 0.840752202316192,
+		1.008418197830401, 1.003430727676753, 1.140588697267007,
+		0.354713295439768, 0.169667380673198, 0.132588002701603,
+		1.395980044639339, 0.622644281080405, 0.472004180871251 };
+	for (int i = 0; i < 24; i++) {
+		features[i] = feat[i % 8][i / 8];
+	}*/
+	//features[23] = 0.472004180871251;
+	//features[22] = 0.132588002701603;
+	//features[15] = 0.622644281080405;
+	//features[14] = 0.169667380673198;
 
 	/*// stop timer
 	QueryPerformanceCounter(&t2);
@@ -1201,14 +1240,14 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 			max_k = k / 2.0 - 1;
 		}
 	}
-	std::cout << std::endl << "BLIINDS score: " << max_k << std::endl <<std::endl;
+	std::cout << "BLIINDS score: " << max_k << std::endl;
 
 	// stop timer
 	QueryPerformanceCounter(&t2);
 
 	// compute and print the elapsed time in millisec
 	elapsedTime = (t2.QuadPart - t1.QuadPart) * 1000.0 / frequency.QuadPart;
-	std::cout << elapsedTime << " ms.\n";
+	std::cout << elapsedTime << " ms.\n\n";
 	cudaDeviceSynchronize();
 	cudaProfilerStop();
 	
