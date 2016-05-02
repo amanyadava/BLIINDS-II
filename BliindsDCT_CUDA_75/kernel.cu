@@ -126,7 +126,7 @@ __global__ void dct55(const float* rearr_img, const double* dctmtx, float* dctIm
 		temp += dct[5 * (x / 5) + i] * (img[5 * i + x % 5]);
 	}
 	__syncthreads();
-	img[x] = temp;// fabsf(temp) > 0.000001 ? temp : 0;;
+	img[x] = temp;
 	__syncthreads();
 	temp = 0.0;
 	for (int i = 0; i < 5; i++) {
@@ -547,10 +547,10 @@ __global__ void oriented_dct_rho(float const * d_dctImg, float * ori_rho, int or
 			dctBlock[7] = fabsf(d_dctImg[blockIdx.x * 25 + 22]);
 		}
 	}
-	for (int i = 0; i < 8; i++) {
+	/*for (int i = 0; i < 8; i++) {
 		if (dctBlock[i] < 0.0001)
 			dctBlock[i] = 0;
-	}
+	}*/
 	double mean = 0.0, std_gauss = 0.0;
 	if (x == 0) {
 		for (int i = 0; i < 8; i++) {
@@ -683,8 +683,8 @@ __global__ void convolveRow(const float * d_input, const int size, float * d_out
 	const int y = blockIdx.x;
 	const int offset = -1;
 	const int num_taps = 3;
-	const float h[3] = { 0.106506978919200, 0.786986042161605, 0.106506978919200 };
-	float val = 0.0;
+	const double h[3] = { 0.106506978919200, 0.786986042161605, 0.106506978919200 };
+	double val = 0.0;
 	/*
 	int x_comp = x + offset;
 	val += h[0] * ((x_comp<0 || x_comp >= size) ? 0 : d_input[y * size + x_comp]);
@@ -707,8 +707,8 @@ __global__ void convolveCol(const float * d_input, const int size, float * d_out
 	const int y = blockIdx.x;
 	const int offset = -1;
 	const int num_taps = 3;
-	const float h[3] = { 0.106506978919200, 0.786986042161605, 0.106506978919200 };
-	float val = 0.0;
+	const double h[3] = { 0.106506978919200, 0.786986042161605, 0.106506978919200 };
+	double val = 0.0;
 	/*
 	int y_comp = y + offset;
 	val += h[0] * ((y_comp<0 || y_comp >= size) ? 0 : d_input[y_comp * size + x]);
