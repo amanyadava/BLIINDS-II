@@ -752,6 +752,7 @@ void device_rst()
 
 void kernel_wrapper(const cv::Mat &Mat_in)
 {
+	/*
 	// cuFFT settings for DCT
 	cufftHandle p;
 	int rank = 1;
@@ -760,10 +761,10 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	int odist;
 	int idist = odist = lengthOfDFT;
 	int ostride;
-	int istride = ostride = 1; /* array is contiguous in memory */
+	int istride = ostride = 1; // array is contiguous in memory
 	cufftPlanMany(&p, rank, &lengthOfDFT, NULL, istride, idist, NULL, ostride,
 		odist, CUFFT_C2C, howmany);
-	
+	*/
 	// The section of code below checks for zero copy feature. This way a kernel can directly use host memory.
 	/*cudaDeviceProp prop;
 	cudaGetDeviceProperties(&prop, 0);
@@ -772,6 +773,7 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	else
 		std::cout << "canMapHostMemory\n";
 	*/
+
 	// Allocate HOST memory
 	float* h_in;												cudaError_t status = cudaMallocHost(&h_in, 512 * 512 * sizeof(float));
 	if (status != cudaSuccess) {
@@ -791,11 +793,6 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	QueryPerformanceFrequency(&frequency);
 	// start timer
 	QueryPerformanceCounter(&t1);
-
-
-	// Create R2C & C2R FFT plans
-	//cufftHandle fftPlanFwd; cufftPlan2d(&fftPlanFwd, 512, 512, CUFFT_R2C);
-	//cufftHandle fftPlanInv; cufftPlan2d(&fftPlanInv, 512, 512, CUFFT_C2R);
 
 	// Linearize image and cast from 8UC1 Mat to float array
 	linearize_and_cast_from_Mat_to_float(Mat_in, h_in);
@@ -830,6 +827,7 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	cudaStreamCreate(&stream2);
 	//cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
 	//cudaStreamCreateWithFlags(&stream2, cudaStreamNonBlocking);
+
 	// copy gama vector
 	cudaMemcpyAsync(d_g_info, bliinds_info::g_vector, 9971 * sizeof(float), cudaMemcpyHostToDevice, stream1);
 
@@ -841,8 +839,10 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	// pad input image for DCT in blocks
 	pad << <517, 517 >> >(d_in, 512, d_in_pad);
 
+	// Total number of DCT blocks at current scale
 	int square = (512 / 3 + 1) * (512 / 3 + 1);
-	rearrangeForCuFFT << <square, 25, 0, 0 >> >(d_in_pad, 512, d_rearr_in);
+	//CuFFT at 512x512
+	/*rearrangeForCuFFT << <square, 25, 0, 0 >> >(d_in_pad, 512, d_rearr_in);
 	
 	cufftExecC2C(p, d_rearr_in, d_dct_in, CUFFT_FORWARD);
 	transposeForCuFFT << <square, 25, 0, 0 >> >(d_dct_in, d_dct_in);
@@ -851,19 +851,28 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 
 	copyDCT << <square, 25 >> >(d_dct_in, d_dctImg);
 	cudaDeviceSynchronize();
-
+	*/
 	//float * h_dctImg = (float*)malloc((512 / 3 + 1) * (512 / 3 + 1) * sizeof(float));
 	//cudaMemcpy(h_dctImg, d_dctImg, (512 / 3 + 1) * (512 / 3 + 1) * 25 * sizeof(float), cudaMemcpyDeviceToHost);
-
 	
 	float* d_rearr_man;											cudaMalloc((void **)&d_rearr_man, 25 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float));
 	double* d_dctmtx;											cudaMalloc((void **)&d_dctmtx, 25 * sizeof(double));
 	cudaMemcpy(d_dctmtx, dct2_55::dctmtx_5, 25 * sizeof(double), cudaMemcpyHostToDevice);
 	rearrangeForDCT << <square, 25 >> >(d_in_pad, 512, d_rearr_man);
-	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);
-	
+	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);	
 
 	rho_dct << <square, 25 >> >(d_dctImg, d_coeff_freq_var_L1);
+	//thrust::device_ptr<float> keys(d_coeff_freq_var_L1);
+	thrust::sort(thrust::device, d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square);
+	int mean10_size = ceil((square) / 10.0);
+	features[0] = thrust::reduce(thrust::device, d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square) / square;
+	features[1] = thrust::reduce(thrust::device, d_coeff_freq_var_L1 + square - mean10_size, d_coeff_freq_var_L1 + square) / mean10_size;
+
+	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L1);
+	thrust::sort(thrust::device, d_gama_L1, d_gama_L1 + square);
+	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L1, d_g_info, d_r_info, d_gama_L1, square);
+	features[2] = thrust::reduce(thrust::device, d_gama_L1, d_gama_L1 + square) / square;
+	features[3] = thrust::reduce(thrust::device, d_gama_L1 + square - mean10_size, d_gama_L1 + square) / mean10_size;
 
 	/*cudaMemcpy(h_dctImg, d_coeff_freq_var_L1, square * sizeof(float), cudaMemcpyDeviceToHost);
 	std::ofstream outfile3("harbourJPGcoeff_freq_varL1GPU.txt");
@@ -881,50 +890,17 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L1, 1);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L1, 2);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L1, 3);
-
 	oriented_dct_final << <square, 1, 0 >> >(d_ori1_rho_L1, d_ori2_rho_L1, d_ori3_rho_L1, d_ori_rho_L1);
-
-	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands);
-
-	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L1);
-	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L1);
-
-	//thrust::device_ptr<float> keys(d_coeff_freq_var_L1);
-	thrust::sort(thrust::device, d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square);
-	int mean10_size = ceil((square) / 10.0);
-	features[0] = thrust::reduce(thrust::device, d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square) / square;
-	features[1] = thrust::reduce(thrust::device, d_coeff_freq_var_L1 + square - mean10_size, d_coeff_freq_var_L1 + square) / mean10_size;
-
-	//cudaMemcpy(h_dctImg, d_gama_L1, (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
-
-	//mean_100 << <171, 171 >> >(d_coeff_freq_var_L1, d_mean_array, 171);
-	//mean_100 << <1, 171 >> >(d_mean_array, d_mean_array, 171);
-
-	//float * h_preFeature_block = (float*)malloc((512 / 3 + 1) * sizeof(float));
-	//cudaMemcpy(h_preFeature_block, d_mean_array, (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
-
-	//mean_100 << <171, 171 >> >(d_freq_bands, d_mean_array, 171);
-	//mean_100 << <1, 171 >> >(d_mean_array, d_mean_array, 171);
-	//cudaMemcpy(h_preFeature_block, d_mean_array, (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
-	thrust::sort(thrust::device, d_freq_bands, d_freq_bands + square);
-	features[4] = thrust::reduce(thrust::device, d_freq_bands, d_freq_bands + square) / square;
-	features[5] = thrust::reduce(thrust::device, d_freq_bands + square - mean10_size, d_freq_bands + square) / mean10_size;
-
-	//mean_100 << <171, 171 >> >(d_ori_rho_L1, d_mean_array, 171);
-	//mean_100 << <1, 171 >> >(d_mean_array, d_mean_array, 171);
-	//cudaMemcpy(h_preFeature_block, d_mean_array, (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
 	thrust::sort(thrust::device, d_ori_rho_L1, d_ori_rho_L1 + square);
 	features[6] = thrust::reduce(thrust::device, d_ori_rho_L1, d_ori_rho_L1 + square) / square;
 	features[7] = thrust::reduce(thrust::device, d_ori_rho_L1 + square - mean10_size, d_ori_rho_L1 + square) / mean10_size;
 
-	//mean_100 << <171, 171 >> >(d_gama_L1, d_mean_array, 171);
-	//mean_100 << <1, 171 >> >(d_mean_array, d_mean_array, 171);
-	//cudaMemcpy(h_preFeature_block, d_mean_array, (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
-	thrust::sort(thrust::device, d_gama_L1, d_gama_L1 + square);
-	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L1, d_g_info, d_r_info, d_gama_L1, square);
-	features[2] = thrust::reduce(thrust::device, d_gama_L1, d_gama_L1 + square) / square;
-	features[3] = thrust::reduce(thrust::device, d_gama_L1 + square - mean10_size, d_gama_L1 + square) / mean10_size;
+	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands);
+	thrust::sort(thrust::device, d_freq_bands, d_freq_bands + square);
+	features[4] = thrust::reduce(thrust::device, d_freq_bands, d_freq_bands + square) / square;
+	features[5] = thrust::reduce(thrust::device, d_freq_bands + square - mean10_size, d_freq_bands + square) / mean10_size;
 
+	//cudaMemcpy(h_dctImg, d_gama_L1, (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
 
 	cudaFree(d_ori1_rho_L1);
 	cudaFree(d_ori2_rho_L1);
@@ -984,11 +960,12 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	}
 	outfile2.close();
 	*/
-	howmany = 5 * square;
+	/*howmany = 5 * square;
 	cufftPlanMany(&p, rank, &lengthOfDFT, NULL, istride, idist, NULL, ostride,
 		odist, CUFFT_C2C, howmany);
 
 	cudaDeviceSynchronize();
+	
 	rearrangeForCuFFT << <square, 25 >> >(d_in_pad_L2, 256, d_rearr_in_L2);
 
 	cufftExecC2C(p, d_rearr_in_L2, d_dct_in, CUFFT_FORWARD);
@@ -998,18 +975,37 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 
 	copyDCT << <square, 25 >> >(d_dct_in, d_dctImg);
 	cudaDeviceSynchronize();
-
+	*/
 	rearrangeForDCT << <square, 25 >> >(d_in_pad_L2, 256, d_rearr_man);
 	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);
 
 	//h_dctImg = (float*)malloc(25 * square * sizeof(float));
 
 	rho_dct << <square, 25 >> >(d_dctImg, d_coeff_freq_var_L2);
+	thrust::sort(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square);
+	mean10_size = ceil((square) / 10.0);
+	features[9] = thrust::reduce(thrust::device, d_coeff_freq_var_L2 + square - mean10_size, d_coeff_freq_var_L2 + square) / mean10_size;
+	features[8] = thrust::reduce(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square) / square;
+
+	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
+	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
+	thrust::sort(thrust::device, d_gama_L2, d_gama_L2 + square);
+	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L2, d_g_info, d_r_info, d_gama_L2, square);
+	features[11] = thrust::reduce(thrust::device, d_gama_L2 + square - mean10_size, d_gama_L2 + square) / mean10_size;
+	features[10] = thrust::reduce(thrust::device, d_gama_L2, d_gama_L2 + square) / square;
+
 	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands_L2);
+	thrust::sort(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square);
+	features[13] = thrust::reduce(thrust::device, d_freq_bands_L2 + square - mean10_size, d_freq_bands_L2 + square) / mean10_size;
+	features[12] = thrust::reduce(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square) / square;
+
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L2, 1);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L2, 2);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L2, 3);
 	oriented_dct_final << <square, 1 >> >(d_ori1_rho_L2, d_ori2_rho_L2, d_ori3_rho_L2, d_ori_rho_L2);
+	thrust::sort(thrust::device, d_ori_rho_L2, d_ori_rho_L2 + square);
+	features[15] = thrust::reduce(thrust::device, d_ori_rho_L2 + square - mean10_size, d_ori_rho_L2 + square) / mean10_size;
+	features[14] = thrust::reduce(thrust::device, d_ori_rho_L2, d_ori_rho_L2 + square) / square;
 	
 	/*float * h_dctImg = (float*)malloc(square * 25 * sizeof(float));
 	cudaMemcpy(h_dctImg, d_dctImg, square * 25 * sizeof(float), cudaMemcpyDeviceToHost);
@@ -1037,31 +1033,6 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 		outfile5 << h_dctImg[j] << std::endl;
 	}
 	outfile5.close();*/
-
-	thrust::sort(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square);
-	mean10_size = ceil((square) / 10.0);
-	features[9] = thrust::reduce(thrust::device, d_coeff_freq_var_L2 + square - mean10_size, d_coeff_freq_var_L2 + square) / mean10_size;
-	features[8] = thrust::reduce(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square) / square;
-
-	//mean_100 << <86, 86 >> >(d_coeff_freq_var_L2, d_mean_array, 86);
-	//mean_100 << <1, 86 >> >(d_mean_array, d_mean_array, 86);
-
-	//cudaMemcpy(h_preFeature_block, d_mean_array, 86 * sizeof(float), cudaMemcpyDeviceToHost);
-
-	thrust::sort(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square);
-	features[13] = thrust::reduce(thrust::device, d_freq_bands_L2 + square - mean10_size, d_freq_bands_L2 + square) / mean10_size;
-	features[12] = thrust::reduce(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square) / square;
-
-	thrust::sort(thrust::device, d_ori_rho_L2, d_ori_rho_L2 + square);
-	features[15] = thrust::reduce(thrust::device, d_ori_rho_L2 + square - mean10_size, d_ori_rho_L2 + square) / mean10_size;
-	features[14] = thrust::reduce(thrust::device, d_ori_rho_L2, d_ori_rho_L2 + square) / square;
-
-	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
-	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
-	thrust::sort(thrust::device, d_gama_L2, d_gama_L2 + square);
-	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L2, d_g_info, d_r_info, d_gama_L2, square);
-	features[11] = thrust::reduce(thrust::device, d_gama_L2 + square - mean10_size, d_gama_L2 + square) / mean10_size;
-	features[10] = thrust::reduce(thrust::device, d_gama_L2, d_gama_L2 + square) / square;
 
 	cudaFree(d_ori1_rho_L2);
 	cudaFree(d_ori2_rho_L2);
@@ -1100,7 +1071,7 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	downsample_by2 << <128, 128 >> >(d_in_convolve_L3, 256, d_in_L3);
 	pad << <133, 133 >> >(d_in_L3, 128, d_in_pad_L3);
 
-	howmany = 5 * square;
+	/*howmany = 5 * square;
 	cufftPlanMany(&p, rank, &lengthOfDFT, NULL, istride, idist, NULL, ostride,
 		odist, CUFFT_C2C, howmany);
 
@@ -1114,36 +1085,36 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 
 	copyDCT << <square, 25 >> >(d_dct_in, d_dctImg);
 	cudaDeviceSynchronize();
-
+	*/
 	rearrangeForDCT << <square, 25 >> >(d_in_pad_L3, 128, d_rearr_man);
 	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);
 	cudaFree(d_dctmtx);
 
 	rho_dct << <square, 25 >> >(d_dctImg, d_coeff_freq_var_L3);
-	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands_L3);
-	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L3, 1);
-	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L3, 2);
-	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L3, 3);
-	oriented_dct_final << <square, 1 >> >(d_ori1_rho_L3, d_ori2_rho_L3, d_ori3_rho_L3, d_ori_rho_L3);
 	thrust::sort(thrust::device, d_coeff_freq_var_L3, d_coeff_freq_var_L3 + square);
 	mean10_size = ceil((square) / 10.0);
 	features[17] = thrust::reduce(thrust::device, d_coeff_freq_var_L3 + square - mean10_size, d_coeff_freq_var_L3 + square) / mean10_size;
 	features[16] = thrust::reduce(thrust::device, d_coeff_freq_var_L3, d_coeff_freq_var_L3 + square) / square;
 
+	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
+	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
+	thrust::sort(thrust::device, d_gama_L3, d_gama_L3 + square);
+	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L3, d_g_info, d_r_info, d_gama_L3, square);
+	features[19] = thrust::reduce(thrust::device, d_gama_L3 + square - mean10_size, d_gama_L3 + square) / mean10_size;
+	features[18] = thrust::reduce(thrust::device, d_gama_L3, d_gama_L3 + square) / square;
+
+	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands_L3);
 	thrust::sort(thrust::device, d_freq_bands_L3, d_freq_bands_L3 + square);
 	features[21] = thrust::reduce(thrust::device, d_freq_bands_L3 + square - mean10_size, d_freq_bands_L3 + square) / mean10_size;
 	features[20] = thrust::reduce(thrust::device, d_freq_bands_L3, d_freq_bands_L3 + square) / square;
 
+	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L3, 1);
+	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L3, 2);
+	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L3, 3);
+	oriented_dct_final << <square, 1 >> >(d_ori1_rho_L3, d_ori2_rho_L3, d_ori3_rho_L3, d_ori_rho_L3);
 	thrust::sort(thrust::device, d_ori_rho_L3, d_ori_rho_L3 + square);
 	features[23] = thrust::reduce(thrust::device, d_ori_rho_L3 + square - mean10_size, d_ori_rho_L3 + square) / mean10_size;
 	features[22] = thrust::reduce(thrust::device, d_ori_rho_L3, d_ori_rho_L3 + square) / square;
-
-	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
-	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
-	thrust::sort(thrust::device, d_gama_L3, d_gama_L3 + square);
-	gama_dct6_3 << <square/1024 + 1, 1024 >> >(d_gama_L3, d_g_info, d_r_info, d_gama_L3, square);
-	features[19] = thrust::reduce(thrust::device, d_gama_L3 + square - mean10_size, d_gama_L3 + square) / mean10_size;
-	features[18] = thrust::reduce(thrust::device, d_gama_L3, d_gama_L3 + square) / square;
 
 	//Print features
 	/*
@@ -1188,22 +1159,6 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	
 	cudaFree(d_in);
 
-	/*float feat[8][3] = { 1.808551723070709, 1.518750988440191, 1.426206740617924,
-		3.545643166198175, 2.659656077505682, 2.646690920712334,
-		1.206939434355863, 0.784996619794482, 0.901723093564089,
-		0.310507692307697, 0.354535135135135, 0.345540540540540,
-		0.886170953042489, 0.897903240956246, 0.840752202316192,
-		1.008418197830401, 1.003430727676753, 1.140588697267007,
-		0.354713295439768, 0.169667380673198, 0.132588002701603,
-		1.395980044639339, 0.622644281080405, 0.472004180871251 };
-	for (int i = 0; i < 24; i++) {
-		features[i] = feat[i % 8][i / 8];
-	}*/
-	//features[23] = 0.472004180871251;
-	//features[22] = 0.132588002701603;
-	//features[15] = 0.622644281080405;
-	//features[14] = 0.169667380673198;
-
 	/*// stop timer
 	QueryPerformanceCounter(&t2);
 
@@ -1231,9 +1186,6 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 		for (int i = 0; i < 25; i++){
 			product += mult_temp[i] * sub_temp[i];
 		}
-		//product = b * product;
-		//product = -pow(product, gama);
-		//product = exp(product);
 		product = exp(-pow(b*product, gama));
 		if (product > max) {
 			max = product;
@@ -1250,109 +1202,5 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	std::cout << elapsedTime << " ms.\n\n";
 	cudaDeviceSynchronize();
 	cudaProfilerStop();
-	
-	/*int temp = 171;
-	temp = (temp | (~temp));
-	std::cout << "round up: " << temp << std::endl;
-	*/
-	/********Print results in file**********************
-	****************************************************/
-	/*
-	cudaMemcpy(h_dctImg, d_dctImg, 25 * square * sizeof(float), cudaMemcpyDeviceToHost);
-	std::ofstream outfile("dct_L2GPU.txt");
-	for (int j = 0; j < 5 * square; j++) {
-		for (int i = 0; i < 5; i++) {
-			outfile << h_dctImg[j * 5 + i] << ", ";
-			//if ((i + 1) % 5 == 0){
-			//}
-		}
-			outfile << std::endl;
-	}
-	outfile.close();
-	*/
-	
-	
-	/*cudaMemcpy(h_dctImg, d_g_info, 9970 * sizeof(float), cudaMemcpyDeviceToHost);
-	std::ofstream outfile2("g_infoGPU.txt");
-	for (int j = 0; j < 9970; j++) {
-		//for (int i = 0; i < 25; i++) {
-		outfile2 << h_dctImg[j];
-		//if ((i + 1) % 5 == 0){
-		outfile2 << std::endl;
-		//}
-		//}
-	}
-	outfile2.close();
-	/*****************************************************
-	**/
-	/*std::cout << "Here is the dctImg:\n";
-	for (int j = 0; j < 171*171; j++) {
-		for (int i = 0; i < 25; i++) {
-			std::cout << h_dctImg[j * 25 + i] << "\t";
-		}
-		std::cout << "\n";
-	}*/
-	//std::cout << "Here is the rho_dct:\n";
-	//for (int j = 0; j < 170; j++) {
-	//	for (int i = 0; i < 170; i++) {
-	//		std::cout << h_preFeature_block[j * 170 + i] << "\t";
-	//	}
-	//	std::cout << "\n";
-	//}
-	
-	
-	//========================================================================================
-	//Test for correct DCT output
-	/*
-	float * h_dctImg = (float*)malloc((512 / 3 + 1) * (512 / 3 + 1) * 25 * sizeof(float));
-	cudaDeviceSynchronize();
-	rearrangeTest << <2, 25 >> >(d_rearr_in);
-	cudaDeviceSynchronize();
-	copyTest << <5, 20 >> >(d_rearr_in, d_dctImg);
-	cudaDeviceSynchronize();
-	cudaMemcpy(h_dctImg, d_dctImg, 4 * 25 * sizeof(float), cudaMemcpyDeviceToHost);
-	cudaDeviceSynchronize();
-	std::cout << "Here is the input:\n";
-	for (int j = 0; j < 2; j++) {
-		for (int i = 0; i < 50; i++) {
-			std::cout << h_dctImg[j * 50 + i] << "\t";
-		}
-		std::cout << "\n";
-	}
-	cufftExecC2C(p, d_rearr_in, d_rearr_in, CUFFT_FORWARD);
-	transposeForCuFFT << <(512 / 3 + 1) ^ 2, 25 >> >(d_rearr_in, d_dct_inter);
 
-	copyDCT << <(512 / 3 + 1) ^ 2, 25 >> >(d_dct_inter, d_dctImg);
-	cudaMemcpy(h_dctImg, d_dctImg, (512 / 3 + 1) * (512 / 3 + 1) * 25 * sizeof(float), cudaMemcpyDeviceToHost);
-	cudaDeviceSynchronize();
-	std::cout << "\nHere is after 1st dct:\n";
-	for (int j = 0; j < 2; j++) {
-		for (int i = 0; i < 25; i++) {
-			if (i % 5 == 0)
-				std::cout << std::endl;
-			std::cout << h_dctImg[j * 25 + i] << "\t";
-		}
-		//std::cout << "\n";
-	}
-
-	cufftExecC2C(p, d_dct_inter, d_dct_inter, CUFFT_FORWARD);
-	transposeForCuFFT << <(512 / 3 + 1) ^ 2, 25 >> >(d_dct_inter, d_dct_in);
-
-	copyDCT << <(512 / 3 + 1) ^ 2, 25 >> >(d_dct_in, d_dctImg);
-
-	
-	cudaMemcpy(h_dctImg, d_dctImg, (512 / 3 + 1) * (512 / 3 + 1) * 25 * sizeof(float), cudaMemcpyDeviceToHost);
-	cudaDeviceSynchronize();
-
-	std::cout << "\nHere is the dct:\n";
-	for (int j = 0; j < 2; j++) {
-		for (int i = 0; i < 25; i++) {
-			if (i % 5 == 0)
-				std::cout << std::endl;
-			std::cout << h_dctImg[j * 25 + i] << "\t";
-		}
-		//std::cout << "\n";
-	}
-	*/
-	
 }
