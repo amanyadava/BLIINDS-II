@@ -555,7 +555,13 @@ __global__ void oriented_dct_rho(float const * d_dctImg, float * ori_rho, int or
 	if (x == 0) {
 		for (int i = 0; i < 8; i++) {
 			mean += dctBlock[i];
+			/*if (y == 1) {
+				printf("%f\n", dctBlock[i]);
+			}*/
 		}
+		/*if (y == 1) {
+			printf("\n");
+		}*/
 		mean /= 8.0;
 		/*if (fabsf(mean) < 0.0001) {
 			ori_rho[y] = 0;
@@ -566,10 +572,43 @@ __global__ void oriented_dct_rho(float const * d_dctImg, float * ori_rho, int or
 			std_gauss += temp * temp;
 		}
 		std_gauss = sqrt(std_gauss / 7.0);
-		ori_rho[y] = std_gauss / (mean + 0.00001);
+		ori_rho[y] = std_gauss / (mean + 0.0000001);
 		/*if (y == 7155) {
 			printf("mean = %0.20f, std_gauss = %0.20f\nori[i] = %0.20f\n", mean, std_gauss, std_gauss / (mean + 0.00000001));
 		}*/
+	}
+}
+
+// Increase the number of warps to 4, threads = 128
+__global__ void oriented_dct_rho2(float const * d_dctImg, float * ori_rho, int orient) {
+	__shared__ float dctBlock[8*8];
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 8;
+	int const sblkIdx = (threadIdx.x / 32) * 8;
+	int const gblkIdx = (y + threadIdx.x / 32) * 25;
+
+	if (x < 8) {
+		if (orient == 1) {
+			int inter_idx = (x + 1) / 5 + (x + 1) / 8;
+			dctBlock[sblkIdx + x] = fabs(d_dctImg[gblkIdx + x + 1 + 5 * inter_idx - (x + 1) / 5 * 3 - (x + 1) / 8]);
+		}
+		else if (orient == 2) {
+			int row = (x + 1) - x / 2 - x / 5 + x / 6 - x / 7;
+			dctBlock[sblkIdx + x] = fabsf(d_dctImg[gblkIdx + row * 5 + x + 1 - x / 3 * 2]);
+		}
+		else if (orient == 3) {
+			int const col = (x + 1) / 5 + (x + 1) / 8;
+			dctBlock[sblkIdx + x] = fabsf(d_dctImg[gblkIdx + (x + 1) * 5 - 14 * col + (x + 1) / 8 * 10]);
+		}
+		double mean = dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] + dctBlock[sblkIdx + 3] + \
+			dctBlock[sblkIdx + 4] + dctBlock[sblkIdx + 5] + dctBlock[sblkIdx + 6] + dctBlock[sblkIdx + 7];
+		mean /= 8;
+		dctBlock[sblkIdx + x] -= mean;
+		double std_gauss = dctBlock[sblkIdx + 0] * dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] * dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] * dctBlock[sblkIdx + 2] + \
+			dctBlock[sblkIdx + 3] * dctBlock[sblkIdx + 3] + dctBlock[sblkIdx + 4] * dctBlock[sblkIdx + 4] + dctBlock[sblkIdx + 5] * dctBlock[sblkIdx + 5] + \
+			dctBlock[sblkIdx + 6] * dctBlock[sblkIdx + 6] + dctBlock[sblkIdx + 7] * dctBlock[sblkIdx + 7];
+		std_gauss = sqrtf(std_gauss / 7);
+		ori_rho[gblkIdx / 25] = std_gauss / (mean + 0.0000001);
 	}
 }
 
@@ -598,6 +637,22 @@ __global__ void oriented_dct_final(const float * ori1_rho, const float * ori2_rh
 	/*if (y == 7155) {
 		printf("ori1 = %0.20f\nori2 = %0.20f\nori3 = %0.20f\nori = %0.20f\n", ori1_rho[y], ori2_rho[y], ori3_rho[y], ori_rho[y]);
 	}*/
+}
+
+// For more warps
+__global__ void oriented_dct_final2(const float * ori1_rho, const float * ori2_rho, const float * ori3_rho, float * ori_rho) {
+	//plan grids = (512/3 + 1)^2, threads = 1
+	int const x = threadIdx.x;
+	int const y = blockIdx.x * 512;
+
+	float num[3];
+	num[0] = ori1_rho[y + x];
+	num[1] = ori2_rho[y + x];
+	num[2] = ori3_rho[y + x];
+	double mean = (num[0] + num[1] + num[2])/3.0;
+	double variance = ((num[0] - mean)*(num[0] - mean) + (num[1] - mean)*(num[1] - mean) + (num[2] - mean)*(num[2] - mean)) / 2.0;
+
+	ori_rho[y + x] = variance;
 }
 
 __global__ void subband_energy(const float * d_dctImg, float * freq_bands) {
@@ -648,6 +703,56 @@ __global__ void subband_energy(const float * d_dctImg, float * freq_bands) {
 		}*/
 		freq_bands[y] = (r1 + r2) / 2.0;
 	}
+}
+
+// Higher number of warps
+__global__ void subband_energy2(const float * d_dctImg, float * freq_bands) {
+	//plan grids = (512/3 + 1)^2, threads = 25
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 8;
+	int const sblkIdx = threadIdx.x / 32;
+	int const gblkIdx = (y + sblkIdx) * 25;
+
+	__shared__ float dctBlock[32*8];
+	__shared__ double inter[3*8];
+	dctBlock[threadIdx.x] = d_dctImg[gblkIdx + x];
+	//__syncthreads();
+	if (x == 0) {
+		const double mean = ((double)dctBlock[sblkIdx * 32 + 1] + dctBlock[sblkIdx * 32 + 2] + dctBlock[sblkIdx * 32 + 5] + \
+			dctBlock[sblkIdx * 32 + 6] + dctBlock[sblkIdx * 32 + 10]) / 5.0;
+		inter[sblkIdx * 3 + 0] = ((dctBlock[sblkIdx * 32 + 1] - mean) * (dctBlock[sblkIdx * 32 + 1] - mean) + (dctBlock[sblkIdx * 32 + 2] - mean) * (dctBlock[sblkIdx * 32 + 2] - mean) +
+			(dctBlock[sblkIdx * 32 + 5] - mean) * (dctBlock[sblkIdx * 32 + 5] - mean) + (dctBlock[sblkIdx * 32 + 6] - mean) * (dctBlock[sblkIdx * 32 + 6] - mean) + \
+			(dctBlock[sblkIdx * 32 + 10] - mean) * (dctBlock[sblkIdx * 32 + 10] - mean)) / 4.0;
+	}
+	if (x == 1) {
+		const float num1 = dctBlock[sblkIdx * 32 + 15], num2 = dctBlock[sblkIdx * 32 + 20], num3 = dctBlock[sblkIdx * 32 + 11], \
+			num4 = dctBlock[sblkIdx * 32 + 16], num5 = dctBlock[sblkIdx * 32 + 21], num6 = dctBlock[sblkIdx * 32 + 7], num7 = dctBlock[sblkIdx * 32 + 12], \
+			num8 = dctBlock[sblkIdx * 32 + 17], num9 = dctBlock[sblkIdx * 32 + 3], num10 = dctBlock[sblkIdx * 32 + 8], num11 = dctBlock[sblkIdx * 32 + 13], \
+			num12 = dctBlock[sblkIdx * 32 + 4], num13 = dctBlock[sblkIdx * 32 + 9];
+		const double mean = ((double)num1 + num2 + num3 + num4 + num5 + num6 + num7 + num8 + num9 + num10 + num11 + num12 + num13) / 13.0;
+		inter[sblkIdx * 3 + 1] = ((num1 - mean) * (num1 - mean) + (num2 - mean) * (num2 - mean) +
+			(num3 - mean) * (num3 - mean) + (num4 - mean) * (num4 - mean) + (num5 - mean) * (num5 - mean) +
+			(num6 - mean) * (num6 - mean) + (num7 - mean) * (num7 - mean) +
+			(num8 - mean) * (num8 - mean) + (num9 - mean) * (num9 - mean) + (num10 - mean) * (num10 - mean) +
+			(num11 - mean) * (num11 - mean) + (num12 - mean) * (num12 - mean) + (num13 - mean) * (num13 - mean)) / 12.0;
+	}
+	if (x == 2) {
+		const double mean = ((double)dctBlock[sblkIdx * 32 + 14] + dctBlock[sblkIdx * 32 + 18] + dctBlock[sblkIdx * 32 + 22] + dctBlock[sblkIdx * 32 + 19] + \
+			dctBlock[sblkIdx * 32 + 23] + dctBlock[sblkIdx * 32 + 24]) / 6.0;
+		inter[sblkIdx * 3 + 2] = ((dctBlock[sblkIdx * 32 + 14] - mean) * (dctBlock[sblkIdx * 32 + 14] - mean) + (dctBlock[sblkIdx * 32 + 18] - mean) * (dctBlock[sblkIdx * 32 + 18] - mean) +
+			(dctBlock[sblkIdx * 32 + 22] - mean) * (dctBlock[sblkIdx * 32 + 22] - mean) + (dctBlock[sblkIdx * 32 + 19] - mean) * (dctBlock[sblkIdx * 32 + 19] - mean) +
+			(dctBlock[sblkIdx * 32 + 23] - mean) * (dctBlock[sblkIdx * 32 + 23] - mean) + (dctBlock[sblkIdx * 32 + 24] - mean) * (dctBlock[sblkIdx * 32 + 24] - mean)) / 5.0;
+	}
+	//__syncthreads();
+	if (x == 0) {
+		const double r1 = fabsf(inter[sblkIdx * 3 + 2] - (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0) / \
+			(inter[sblkIdx * 3 + 2] + (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0 + 0.00000001);
+		const double r2 = fabsf(inter[sblkIdx * 3 + 1] - inter[sblkIdx * 3 + 0]) / (inter[sblkIdx * 3 + 2] + inter[sblkIdx * 3 + 0] + 0.00000001);
+		freq_bands[gblkIdx / 25] = (r1 + r2) / 2.0;
+	}
+	/*if (gblkIdx + x == 200) {
+		printf("inter[0] = %f\ninter[1] = %f\ninter[2] = %f\n", inter[sblkIdx * 3], inter[sblkIdx + 1], inter[sblkIdx + 2]);
+	}*/
 }
 
 __global__ void mean_100(float * d_input, float * d_mean_array, int num_elements) {
@@ -887,15 +992,19 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	outfile3.close();
 	*/
 
+	/*std::cout << "square1 = " << square << std::endl;
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L1, 1);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L1, 2);
-	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L1, 3);
-	oriented_dct_final << <square, 1, 0 >> >(d_ori1_rho_L1, d_ori2_rho_L1, d_ori3_rho_L1, d_ori_rho_L1);
+	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L1, 3);*/
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori1_rho_L1, 1);
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori2_rho_L1, 2);
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori3_rho_L1, 3);
+	oriented_dct_final2 << <square / 512 + 1, 512, 0 >> >(d_ori1_rho_L1, d_ori2_rho_L1, d_ori3_rho_L1, d_ori_rho_L1);
 	thrust::sort(thrust::device, d_ori_rho_L1, d_ori_rho_L1 + square);
 	features[6] = thrust::reduce(thrust::device, d_ori_rho_L1, d_ori_rho_L1 + square) / square;
 	features[7] = thrust::reduce(thrust::device, d_ori_rho_L1 + square - mean10_size, d_ori_rho_L1 + square) / mean10_size;
 
-	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands);
+	subband_energy2 << <square / 8 + 1, 256 >> >(d_dctImg, d_freq_bands);
 	thrust::sort(thrust::device, d_freq_bands, d_freq_bands + square);
 	features[4] = thrust::reduce(thrust::device, d_freq_bands, d_freq_bands + square) / square;
 	features[5] = thrust::reduce(thrust::device, d_freq_bands + square - mean10_size, d_freq_bands + square) / mean10_size;
@@ -994,15 +1103,19 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	features[11] = thrust::reduce(thrust::device, d_gama_L2 + square - mean10_size, d_gama_L2 + square) / mean10_size;
 	features[10] = thrust::reduce(thrust::device, d_gama_L2, d_gama_L2 + square) / square;
 
-	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands_L2);
+	subband_energy2 << <square / 8 + 1, 256 >> >(d_dctImg, d_freq_bands_L2);
 	thrust::sort(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square);
 	features[13] = thrust::reduce(thrust::device, d_freq_bands_L2 + square - mean10_size, d_freq_bands_L2 + square) / mean10_size;
 	features[12] = thrust::reduce(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square) / square;
 
+	/*std::cout << "square2 = " << square << std::endl;
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L2, 1);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L2, 2);
-	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L2, 3);
-	oriented_dct_final << <square, 1 >> >(d_ori1_rho_L2, d_ori2_rho_L2, d_ori3_rho_L2, d_ori_rho_L2);
+	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L2, 3);*/
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori1_rho_L2, 1);
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori2_rho_L2, 2);
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori3_rho_L2, 3);
+	oriented_dct_final2 << <square / 512 + 1, 512 >> >(d_ori1_rho_L2, d_ori2_rho_L2, d_ori3_rho_L2, d_ori_rho_L2);
 	thrust::sort(thrust::device, d_ori_rho_L2, d_ori_rho_L2 + square);
 	features[15] = thrust::reduce(thrust::device, d_ori_rho_L2 + square - mean10_size, d_ori_rho_L2 + square) / mean10_size;
 	features[14] = thrust::reduce(thrust::device, d_ori_rho_L2, d_ori_rho_L2 + square) / square;
@@ -1103,15 +1216,20 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	features[19] = thrust::reduce(thrust::device, d_gama_L3 + square - mean10_size, d_gama_L3 + square) / mean10_size;
 	features[18] = thrust::reduce(thrust::device, d_gama_L3, d_gama_L3 + square) / square;
 
-	subband_energy << <square, 25 >> >(d_dctImg, d_freq_bands_L3);
+	// square = 1849
+	subband_energy2 << <square / 8 + 1, 256 >> >(d_dctImg, d_freq_bands_L3);
 	thrust::sort(thrust::device, d_freq_bands_L3, d_freq_bands_L3 + square);
 	features[21] = thrust::reduce(thrust::device, d_freq_bands_L3 + square - mean10_size, d_freq_bands_L3 + square) / mean10_size;
 	features[20] = thrust::reduce(thrust::device, d_freq_bands_L3, d_freq_bands_L3 + square) / square;
 
+	/*std::cout << "square3 = " << square << std::endl;
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori1_rho_L3, 1);
 	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori2_rho_L3, 2);
-	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L3, 3);
-	oriented_dct_final << <square, 1 >> >(d_ori1_rho_L3, d_ori2_rho_L3, d_ori3_rho_L3, d_ori_rho_L3);
+	oriented_dct_rho << <square, 1 >> >(d_dctImg, d_ori3_rho_L3, 3);*/
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori1_rho_L3, 1);
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori2_rho_L3, 2);
+	oriented_dct_rho2 << <square / 8 + 1, 256 >> >(d_dctImg, d_ori3_rho_L3, 3);
+	oriented_dct_final2 << <square / 512 + 1, 512 >> >(d_ori1_rho_L3, d_ori2_rho_L3, d_ori3_rho_L3, d_ori_rho_L3);
 	thrust::sort(thrust::device, d_ori_rho_L3, d_ori_rho_L3 + square);
 	features[23] = thrust::reduce(thrust::device, d_ori_rho_L3 + square - mean10_size, d_ori_rho_L3 + square) / mean10_size;
 	features[22] = thrust::reduce(thrust::device, d_ori_rho_L3, d_ori_rho_L3 + square) / square;
