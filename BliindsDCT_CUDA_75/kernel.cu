@@ -26,6 +26,10 @@ __global__ void rearrangeForCuFFT(float const * new_img, const int size, cufftCo
 	rearr_img[y * 50 + (x / 5 + 1) * 10 - x % 5 - 1].y = 0;
 }
 
+__global__ void setZero(float * array) {
+	array[threadIdx.x + blockIdx.x * blockDim.x] = 0.0f;
+}
+
 __global__ void rearrangeForDCT(float const * new_img, const int size, float * rearr_img) {
 	// threads = 25, blocks = (512/3 +1)^2
 	int const x = threadIdx.x;
@@ -33,6 +37,21 @@ __global__ void rearrangeForDCT(float const * new_img, const int size, float * r
 	int const pos = (y / (size / 3 + 1)) * 3 * (size + 5) + (y % (size / 3 + 1)) * 3; // position in new_img of first block element to be copied
 	//*****Important*** change this to row-wise
 	rearr_img[y * 25 + x] = new_img[pos + x % 5 + x / 5 * (size + 5)];
+	/*if (x == 0 && y == 0)
+		printf("I can print\n");*/
+}
+
+// Higher warps
+__global__ void rearrangeForDCTv2(float const * new_img, const int size, float * rearr_img) {
+	// threads = 25, blocks = (512/3 +1)^2
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 4;
+	int const sblkIdx = threadIdx.x / 32;
+	int const gblkIdx = y + sblkIdx;
+	int const pos = (gblkIdx / (size / 3 + 1)) * 3 * (size + 5) + (gblkIdx % (size / 3 + 1)) * 3; // position in new_img of first block element to be copied
+	//*****Important*** change this to row-wise
+	if (x<25)
+		rearr_img[gblkIdx * 32 + x] = new_img[pos + x % 5 + x / 5 * (size + 5)];
 }
 
 __global__ void transposeForCuFFT(cufftComplex const*read, cufftComplex *write) {
@@ -49,62 +68,7 @@ __global__ void transposeForCuFFT(cufftComplex const*read, cufftComplex *write) 
 	write[y * 50 + (x / 5 + 1) * 10 - x % 5 - 1].y = 0;
 }
 
-/*__global__ void DCT(float* rearr_img, float* cos_table, float* dctImg) {
-	// threads = 25, blocks = (512/3 +1)^2
-
-	__shared__ float blkImg[50] = { 0 };
-	__shared__ float cos_[25];
-	int const x = threadIdx.x;
-	int const y = blockIdx.x;
-	blkImg[x] = rearr_img[y * 25 + x];
-	cos_[x] = cos_table[y * 25 + x];
-	float scalar;
-	__syncthreads();
-	if (x < 1) {
-		for (int i = 0; i < 25; i++) {
-			blkImg[25] += blkImg[i];
-		}
-		blkImg[25] /= 125.0;
-	}
-	//__syncthreads();
-	else if (x > 0 && x < 5) {
-		int temp = 0;
-		for (int m = 0; m < 5; m++) {
-			for (int n = 0; n < 5; n++) {
-				temp += blkImg[5 * n + m] * cos_[5 * m + x];
-			}
-		}
-		blkImg[25 + x] = temp * std::sqrt(2) / 5;
-	}
-	else if (x > 0 && x % 5 == 0) {
-		float temp = 0;
-		for (int m = 0; m < 5; m++) {
-			for (int n = 0; n < 5; n++) {
-				temp += blkImg[5 * n + m] * cos_[5 * n + x / 5];
-			}
-		}
-		blkImg[25 + x] = temp * std::sqrt(2) / 5;
-	}
-	else {
-		float temp = 0, temp1 = 0;
-		for (int m = 0; m < 5; m++) {
-			float y = cos_[m*5 + x % 5];
-			for (int n = 0; n < 5; n++) {
-				float x = cos_[5 * n + x / 5];
-				float tempx = x * y;
-				float tempx1 = blkImg[5 * n + m];
-				float tempx2 = tempx1 * tempx;
-				float tmpx3 = temp;
-				temp1 = tempx2 + tmpx3;
-				temp = temp1;
-				tempx2 = tempx1 * tmpx3;
-			}
-		}
-	}
-	
-}*/
-
-__global__ void dct55(const float* rearr_img, const double* dctmtx, float* dctImg) {
+__global__ void dct55(const float * rearr_img, const double* dctmtx, float* dctImg) {
 	//threads = 25, blocks = (512/3 +1)^2
 
 	int const x = threadIdx.x;
@@ -141,6 +105,62 @@ __global__ void dct55(const float* rearr_img, const double* dctmtx, float* dctIm
 			printf("\n");
 		}
 	}*/
+}
+
+__global__ void dct55v2(float* rearr_img, const double* dctmtx, float* dctImg) {
+	int const x = threadIdx.x%32;
+	int const y = blockIdx.x*8;
+	int const sblkIdx = threadIdx.x / 32;
+	int const gblkIdx = (y + sblkIdx) * 32;
+	__shared__ float img[32*8];
+	__shared__ double dct[32];
+	img[threadIdx.x] = rearr_img[gblkIdx + x];
+	dct[x] = dctmtx[x];
+	double temp = 0.0f;
+	for (int i = 0; i < 5; i++) {
+		temp += dct[5 * (x / 5) + i] * img[sblkIdx * 32 + 5 * i + x % 5];
+	}
+	if (x<25)
+		img[threadIdx.x] = temp;
+	temp = 0.0f;
+	for (int i = 0; i < 5; i++) {
+		temp += img[sblkIdx * 32 + 5 * (x / 5) + i] * dct[5 * (x % 5) + i];
+	}
+	if (x>0 && x<25)
+		dctImg[gblkIdx + x/*5*(x%5) + x/5*/] = temp;
+	/*if (gblkIdx == 0 && x < 32) {
+		printf("%f\n", dctImg[gblkIdx + x]);
+	}*/
+}
+
+// Merge rearrange and DCT into one kernel. Hoping to avoid register spilling
+__global__ void rearrangeAndDCT55(float const* new_img, const int size, const double* dctmtx, float* dctImg) {
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 8;
+	int const sblkIdx = threadIdx.x / 32;
+	int const gblkIdx = y + sblkIdx;
+	int const pos = (gblkIdx / (size / 3 + 1)) * 3 * (size + 5) + (gblkIdx % (size / 3 + 1)) * 3; // position in new_img of first block element to be copied
+	__shared__ float img[32 * 8];
+	__shared__ double dct[32];
+	//*****Important*** change this to row-wise
+	//img[threadIdx.x] = 0;
+	//if (x<25)
+
+	//int const gblkIdx = (y + sblkIdx) * 32;
+	img[threadIdx.x] = new_img[pos + x % 5 + x / 5 * (size + 5)];
+	dct[x] = dctmtx[x];
+	double temp = 0.0f;
+	for (int i = 0; i < 5; i++) {
+		temp += dct[5 * (x / 5) + i] * img[sblkIdx * 32 + 5 * i + x % 5];
+	}
+	if (x<25)
+		img[threadIdx.x] = temp;
+	temp = 0.0f;
+	for (int i = 0; i < 5; i++) {
+		temp += img[sblkIdx * 32 + 5 * (x / 5) + i] * dct[5 * (x % 5) + i];
+	}
+	if (x>0 && x<25)
+		dctImg[gblkIdx * 32 + x/*5*(x%5) + x/5*/] = temp;
 }
 
 __global__ void copyDCT(cufftComplex const*dct_img, float *dctImg) {
@@ -202,6 +222,50 @@ __global__ void rho_dct(float const* d_dctImg, float * coeff_freq_var) {
 		
 	}
 		
+}
+
+__device__ inline void MyAtomicAdd(float *address, float value)
+{
+	int oldval, newval, readback;
+
+	oldval = __float_as_int(*address);
+	newval = __float_as_int(__int_as_float(oldval) + value);
+	while ((readback = atomicCAS((int *)address, oldval, newval)) != oldval)
+	{
+		oldval = readback;
+		newval = __float_as_int(__int_as_float(oldval) + value);
+	}
+}
+
+// Higher number of warps
+__global__ void rho_dct2(float const* d_dctImg, float * coeff_freq_var) {
+	//plan grids = (512/3 + 1)^2, threads = 25
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 16;
+	int const sblkIdx = threadIdx.x / 32;
+	int const gblkIdx = (y + sblkIdx) * 32;
+
+	__shared__ float dctBlock[32 * 16];
+	dctBlock[threadIdx.x] = fabs(d_dctImg[gblkIdx + x]);
+	dctBlock[sblkIdx * 32] = 0;
+	//__syncthreads();
+
+	//if (x == 0) {
+	float mean_abs = 0, std_gauss = 0;
+	#pragma unroll
+	for (int i = 1; i < 25; i++) {
+		mean_abs += dctBlock[sblkIdx * 32 + i];
+	}
+	mean_abs /= 24.0f;
+	dctBlock[threadIdx.x] -= mean_abs;
+#pragma unroll
+	for (int i = 1; i < 25; i++) {
+		//float temp = dctBlock[sblkIdx * 32 + i] - mean_abs;
+		std_gauss += dctBlock[sblkIdx * 32 + i] * dctBlock[sblkIdx * 32 + i];
+	}
+	std_gauss = sqrt(std_gauss / 23.0f);
+	coeff_freq_var[gblkIdx / 32] = std_gauss / (mean_abs + 0.0000001f);
+	//}
 }
 
 __global__ void gama_dct(float const * d_dctImg, float const * g_vector, float const * r_vector, float * d_gama) {
@@ -473,9 +537,44 @@ __global__ void gama_dct6(float const * d_dctImg, float const * g_vector, float 
 	}
 }
 
+// gama_dct6 with higher warps
+__global__ void gama_dct62(float const * d_dctImg, float const * g_vector, float const * r_vector, float * d_gama) {
+	//plan grids = (512/3 + 1)^2, threads = 25
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 16;
+	int const sblkIdx = threadIdx.x / 32;
+	int const gblkIdx = (y + sblkIdx) * 32;
+	__shared__ float dctBlock[32*16];
+	dctBlock[threadIdx.x] = d_dctImg[gblkIdx + x];
+	//__syncthreads();
+	//if (x == 0) {
+		float mean_gauss = 0;
+#pragma unroll
+		for (int i = 1; i < 25; i++) {
+			mean_gauss += dctBlock[sblkIdx * 32 + i];
+		}
+		mean_gauss = mean_gauss / 24.0f;
+		float var_gauss = 0;
+		float mean_abs = 0;
+		dctBlock[sblkIdx * 32 + x] = fabsf(dctBlock[sblkIdx * 32 + x] - mean_gauss);
+#pragma unroll
+		for (int i = 1; i < 25; i++) {
+			//float temp = fabsf(dctBlock[i] - mean_gauss);
+			var_gauss += dctBlock[sblkIdx * 32 + i] * dctBlock[sblkIdx * 32 + i];
+			mean_abs += dctBlock[sblkIdx * 32 + i];
+		}
+		var_gauss = var_gauss / 23.0f;
+		mean_abs = mean_abs / 24.0f;
+		mean_abs *= mean_abs;
+		const float rho = var_gauss / (mean_abs + 0.0000001f);
+
+		d_gama[gblkIdx / 32] = rho;
+	//}
+}
+
 __global__ void gama_dct6_3(float * d_rho, float const * g_vector, float const * r_vector, float * d_gama, int max) {
 	int const pos = threadIdx.x + blockIdx.x * blockDim.x;
-	if (pos < max) {
+	//if (pos < max) {
 		float const rho = d_rho[pos];
 		int left(0), right(9970), mid(4985);
 		float gamma_gauss = 11;
@@ -495,7 +594,7 @@ __global__ void gama_dct6_3(float * d_rho, float const * g_vector, float const *
 			}
 		}
 		d_gama[pos] = gamma_gauss;
-	}	
+	//}	
 	/*float gamma_gauss = 11.0;
 		for (int j = 0; j < 9970; j++) {
 			if (rho>r_vector[j + 1] && rho <= r_vector[j]) {
@@ -581,12 +680,16 @@ __global__ void oriented_dct_rho(float const * d_dctImg, float * ori_rho, int or
 
 // Increase the number of warps to 4, threads = 128
 __global__ void oriented_dct_rho2(float const * d_dctImg, float * ori_rho, int orient) {
-	__shared__ float dctBlock[8*8];
+	__shared__ float dctBlock[32*8];
 	int const x = threadIdx.x % 32;
 	int const y = blockIdx.x * 8;
-	int const sblkIdx = (threadIdx.x / 32) * 8;
-	int const gblkIdx = (y + threadIdx.x / 32) * 25;
-
+	int const sblkIdx = (threadIdx.x / 32) * 32;
+	int const gblkIdx = (y + threadIdx.x / 32) * 32;
+	int const ori[3] = {
+		2042757120,	// 0b01111001110000100000000000000000
+		34369920,	// 0b00000010000011000111000110000000
+		70356480	// 0b00000100001100011000111000000000
+	};
 	if (x < 8) {
 		if (orient == 1) {
 			int inter_idx = (x + 1) / 5 + (x + 1) / 8;
@@ -600,16 +703,95 @@ __global__ void oriented_dct_rho2(float const * d_dctImg, float * ori_rho, int o
 			int const col = (x + 1) / 5 + (x + 1) / 8;
 			dctBlock[sblkIdx + x] = fabsf(d_dctImg[gblkIdx + (x + 1) * 5 - 14 * col + (x + 1) / 8 * 10]);
 		}
-		double mean = dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] + dctBlock[sblkIdx + 3] + \
+		float mean = dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] + dctBlock[sblkIdx + 3] + \
 			dctBlock[sblkIdx + 4] + dctBlock[sblkIdx + 5] + dctBlock[sblkIdx + 6] + dctBlock[sblkIdx + 7];
 		mean /= 8;
 		dctBlock[sblkIdx + x] -= mean;
-		double std_gauss = dctBlock[sblkIdx + 0] * dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] * dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] * dctBlock[sblkIdx + 2] + \
+		float std_gauss = dctBlock[sblkIdx + 0] * dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] * dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] * dctBlock[sblkIdx + 2] + \
 			dctBlock[sblkIdx + 3] * dctBlock[sblkIdx + 3] + dctBlock[sblkIdx + 4] * dctBlock[sblkIdx + 4] + dctBlock[sblkIdx + 5] * dctBlock[sblkIdx + 5] + \
 			dctBlock[sblkIdx + 6] * dctBlock[sblkIdx + 6] + dctBlock[sblkIdx + 7] * dctBlock[sblkIdx + 7];
 		std_gauss = sqrtf(std_gauss / 7);
-		ori_rho[gblkIdx / 25] = std_gauss / (mean + 0.0000001);
+		ori_rho[gblkIdx / 32] = std_gauss / (mean + 0.0000001f);
 	}
+}
+
+// Increase the number of warps to 4, threads = 128
+__global__ void oriented_dct_rho3(float const * d_dctImg, float * ori_rho, int orient) {
+	__shared__ float dctBlock[32 * 8];
+	//dctBlock[threadIdx.x] = 0;
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 8;
+	int const sblkIdx = (threadIdx.x / 32);
+	int const gblkIdx = (y + threadIdx.x / 32) * 25;
+	int  const ori = (orient - 1) * 32;
+
+	/*__shared__*/ bool const orient_mat[96] = {
+		//orient 1
+		0, 1, 1, 1, 1,
+		0, 0, 1, 1, 1,
+		0, 0, 0, 0, 1,
+		0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, // extras for alignment to 32
+		0, 0,
+
+		//orient 2
+		0, 0, 0, 0, 0,
+		0, 1, 0, 0, 0,
+		0, 0, 1, 1, 0,
+		0, 0, 1, 1, 1,
+		0, 0, 0, 1, 1,
+		0, 0, 0, 0, 0, // extras for alignment to 32
+		0, 0,
+
+		//orient 3
+		0, 0, 0, 0, 0,
+		1, 0, 0, 0, 0,
+		1, 1, 0, 0, 0,
+		1, 1, 0, 0, 0,
+		1, 1, 1, 0, 0,
+		0, 0, 0, 0, 0, // extras for alignment to 32
+		0, 0,
+	};
+	dctBlock[threadIdx.x] = fabsf(d_dctImg[gblkIdx + x]);
+	if (orient_mat[ori + x] == 0) {
+		dctBlock[sblkIdx * 32 + x] = 0;
+	}
+	float mean = 0, std_gauss = 0;
+	for (int i = 1; i < 25; i++) {
+		mean += dctBlock[sblkIdx * 32 + i];
+	}
+	mean /= 8.0f;
+	dctBlock[threadIdx.x] -= mean;
+	for (int i = 1; i < 25; i++) {
+		if (orient_mat[ori + i]) {
+			std_gauss += dctBlock[sblkIdx * 32 + i] * dctBlock[sblkIdx * 32 + i];
+		}
+	}
+	std_gauss = sqrtf(std_gauss / 7.0f);
+	//if (x < 8) {
+	/*if (orient == 1) {
+	int inter_idx = (x + 1) / 5 + (x + 1) / 8;
+	dctBlock[sblkIdx + x] = fabs(d_dctImg[gblkIdx + x + 1 + 5 * inter_idx - (x + 1) / 5 * 3 - (x + 1) / 8]);
+	}
+	else if (orient == 2) {
+	int row = (x + 1) - x / 2 - x / 5 + x / 6 - x / 7;
+	dctBlock[sblkIdx + x] = fabsf(d_dctImg[gblkIdx + row * 5 + x + 1 - x / 3 * 2]);
+	}
+	else if (orient == 3) {
+	int const col = (x + 1) / 5 + (x + 1) / 8;
+	dctBlock[sblkIdx + x] = fabsf(d_dctImg[gblkIdx + (x + 1) * 5 - 14 * col + (x + 1) / 8 * 10]);
+	}
+	double mean = dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] + dctBlock[sblkIdx + 3] + \
+	dctBlock[sblkIdx + 4] + dctBlock[sblkIdx + 5] + dctBlock[sblkIdx + 6] + dctBlock[sblkIdx + 7];
+	mean /= 8;
+	dctBlock[sblkIdx + x] -= mean;
+	double std_gauss = dctBlock[sblkIdx + 0] * dctBlock[sblkIdx + 0] + dctBlock[sblkIdx + 1] * dctBlock[sblkIdx + 1] + dctBlock[sblkIdx + 2] * dctBlock[sblkIdx + 2] + \
+	dctBlock[sblkIdx + 3] * dctBlock[sblkIdx + 3] + dctBlock[sblkIdx + 4] * dctBlock[sblkIdx + 4] + dctBlock[sblkIdx + 5] * dctBlock[sblkIdx + 5] + \
+	dctBlock[sblkIdx + 6] * dctBlock[sblkIdx + 6] + dctBlock[sblkIdx + 7] * dctBlock[sblkIdx + 7];
+	std_gauss = sqrtf(std_gauss / 7);*/
+	ori_rho[gblkIdx / 25] = std_gauss / (mean + 0.0000001f);
+	//}
 }
 
 __global__ void oriented_dct_final(const float * ori1_rho, const float * ori2_rho, const float * ori3_rho, float * ori_rho) {
@@ -649,8 +831,8 @@ __global__ void oriented_dct_final2(const float * ori1_rho, const float * ori2_r
 	num[0] = ori1_rho[y + x];
 	num[1] = ori2_rho[y + x];
 	num[2] = ori3_rho[y + x];
-	double mean = (num[0] + num[1] + num[2])/3.0;
-	double variance = ((num[0] - mean)*(num[0] - mean) + (num[1] - mean)*(num[1] - mean) + (num[2] - mean)*(num[2] - mean)) / 2.0;
+	float mean = (num[0] + num[1] + num[2])/3.0;
+	float variance = ((num[0] - mean)*(num[0] - mean) + (num[1] - mean)*(num[1] - mean) + (num[2] - mean)*(num[2] - mean)) / 2.0;
 
 	ori_rho[y + x] = variance;
 }
@@ -709,50 +891,126 @@ __global__ void subband_energy(const float * d_dctImg, float * freq_bands) {
 __global__ void subband_energy2(const float * d_dctImg, float * freq_bands) {
 	//plan grids = (512/3 + 1)^2, threads = 25
 	int const x = threadIdx.x % 32;
-	int const y = blockIdx.x * 8;
+	int const y = blockIdx.x * 4;
 	int const sblkIdx = threadIdx.x / 32;
-	int const gblkIdx = (y + sblkIdx) * 25;
+	int const gblkIdx = (y + sblkIdx) * 32;
 
-	__shared__ float dctBlock[32*8];
-	__shared__ double inter[3*8];
+	__shared__ float dctBlock[32*4];
+	__shared__ float inter[3*4];
 	dctBlock[threadIdx.x] = d_dctImg[gblkIdx + x];
 	//__syncthreads();
-	if (x == 0) {
-		const double mean = ((double)dctBlock[sblkIdx * 32 + 1] + dctBlock[sblkIdx * 32 + 2] + dctBlock[sblkIdx * 32 + 5] + \
-			dctBlock[sblkIdx * 32 + 6] + dctBlock[sblkIdx * 32 + 10]) / 5.0;
-		inter[sblkIdx * 3 + 0] = ((dctBlock[sblkIdx * 32 + 1] - mean) * (dctBlock[sblkIdx * 32 + 1] - mean) + (dctBlock[sblkIdx * 32 + 2] - mean) * (dctBlock[sblkIdx * 32 + 2] - mean) +
-			(dctBlock[sblkIdx * 32 + 5] - mean) * (dctBlock[sblkIdx * 32 + 5] - mean) + (dctBlock[sblkIdx * 32 + 6] - mean) * (dctBlock[sblkIdx * 32 + 6] - mean) + \
-			(dctBlock[sblkIdx * 32 + 10] - mean) * (dctBlock[sblkIdx * 32 + 10] - mean)) / 4.0;
-	}
-	if (x == 1) {
-		const float num1 = dctBlock[sblkIdx * 32 + 15], num2 = dctBlock[sblkIdx * 32 + 20], num3 = dctBlock[sblkIdx * 32 + 11], \
+	//if (x == 0) {
+		const float mean1 = (dctBlock[sblkIdx * 32 + 1] + dctBlock[sblkIdx * 32 + 2] + dctBlock[sblkIdx * 32 + 5] + \
+			dctBlock[sblkIdx * 32 + 6] + dctBlock[sblkIdx * 32 + 10]) / 5.0f;
+		/*dctBlock[sblkIdx * 32 + x] -= mean;
+		inter[sblkIdx * 3 + 0] = ((dctBlock[sblkIdx * 32 + 1]) * (dctBlock[sblkIdx * 32 + 1]) + (dctBlock[sblkIdx * 32 + 2]) * (dctBlock[sblkIdx * 32 + 2]) +
+			(dctBlock[sblkIdx * 32 + 5]) * (dctBlock[sblkIdx * 32 + 5]) + (dctBlock[sblkIdx * 32 + 6]) * (dctBlock[sblkIdx * 32 + 6]) + \
+			(dctBlock[sblkIdx * 32 + 10]) * (dctBlock[sblkIdx * 32 + 10])) / 4.0;
+		dctBlock[sblkIdx * 32 + x] += mean;*/
+		inter[sblkIdx * 3 + 0] = ((dctBlock[sblkIdx * 32 + 1] - mean1) * (dctBlock[sblkIdx * 32 + 1] - mean1) + (dctBlock[sblkIdx * 32 + 2] - mean1) * (dctBlock[sblkIdx * 32 + 2] - mean1) +
+			(dctBlock[sblkIdx * 32 + 5] - mean1) * (dctBlock[sblkIdx * 32 + 5] - mean1) + (dctBlock[sblkIdx * 32 + 6] - mean1) * (dctBlock[sblkIdx * 32 + 6] - mean1) + \
+			(dctBlock[sblkIdx * 32 + 10] - mean1) * (dctBlock[sblkIdx * 32 + 10] - mean1)) / 4.0f;
+	//}
+	//if (x == 1) {
+		/*const float num1 = dctBlock[sblkIdx * 32 + 15], num2 = dctBlock[sblkIdx * 32 + 20], num3 = dctBlock[sblkIdx * 32 + 11], \
 			num4 = dctBlock[sblkIdx * 32 + 16], num5 = dctBlock[sblkIdx * 32 + 21], num6 = dctBlock[sblkIdx * 32 + 7], num7 = dctBlock[sblkIdx * 32 + 12], \
 			num8 = dctBlock[sblkIdx * 32 + 17], num9 = dctBlock[sblkIdx * 32 + 3], num10 = dctBlock[sblkIdx * 32 + 8], num11 = dctBlock[sblkIdx * 32 + 13], \
-			num12 = dctBlock[sblkIdx * 32 + 4], num13 = dctBlock[sblkIdx * 32 + 9];
-		const double mean = ((double)num1 + num2 + num3 + num4 + num5 + num6 + num7 + num8 + num9 + num10 + num11 + num12 + num13) / 13.0;
-		inter[sblkIdx * 3 + 1] = ((num1 - mean) * (num1 - mean) + (num2 - mean) * (num2 - mean) +
-			(num3 - mean) * (num3 - mean) + (num4 - mean) * (num4 - mean) + (num5 - mean) * (num5 - mean) +
-			(num6 - mean) * (num6 - mean) + (num7 - mean) * (num7 - mean) +
-			(num8 - mean) * (num8 - mean) + (num9 - mean) * (num9 - mean) + (num10 - mean) * (num10 - mean) +
-			(num11 - mean) * (num11 - mean) + (num12 - mean) * (num12 - mean) + (num13 - mean) * (num13 - mean)) / 12.0;
-	}
-	if (x == 2) {
-		const double mean = ((double)dctBlock[sblkIdx * 32 + 14] + dctBlock[sblkIdx * 32 + 18] + dctBlock[sblkIdx * 32 + 22] + dctBlock[sblkIdx * 32 + 19] + \
-			dctBlock[sblkIdx * 32 + 23] + dctBlock[sblkIdx * 32 + 24]) / 6.0;
-		inter[sblkIdx * 3 + 2] = ((dctBlock[sblkIdx * 32 + 14] - mean) * (dctBlock[sblkIdx * 32 + 14] - mean) + (dctBlock[sblkIdx * 32 + 18] - mean) * (dctBlock[sblkIdx * 32 + 18] - mean) +
-			(dctBlock[sblkIdx * 32 + 22] - mean) * (dctBlock[sblkIdx * 32 + 22] - mean) + (dctBlock[sblkIdx * 32 + 19] - mean) * (dctBlock[sblkIdx * 32 + 19] - mean) +
-			(dctBlock[sblkIdx * 32 + 23] - mean) * (dctBlock[sblkIdx * 32 + 23] - mean) + (dctBlock[sblkIdx * 32 + 24] - mean) * (dctBlock[sblkIdx * 32 + 24] - mean)) / 5.0;
-	}
+			num12 = dctBlock[sblkIdx * 32 + 4], num13 = dctBlock[sblkIdx * 32 + 9];*/
+		/*const double*/ const float mean2 = (dctBlock[sblkIdx * 32 + 15] + dctBlock[sblkIdx * 32 + 20] + dctBlock[sblkIdx * 32 + 11] + \
+			dctBlock[sblkIdx * 32 + 16] + dctBlock[sblkIdx * 32 + 21] + dctBlock[sblkIdx * 32 + 7] + dctBlock[sblkIdx * 32 + 12] + \
+			dctBlock[sblkIdx * 32 + 17] + dctBlock[sblkIdx * 32 + 3] + dctBlock[sblkIdx * 32 + 8] + dctBlock[sblkIdx * 32 + 13] + \
+			dctBlock[sblkIdx * 32 + 4] + dctBlock[sblkIdx * 32 + 9]) / 13.0f;
+		/*dctBlock[sblkIdx * 32 + x] -= mean;
+		inter[sblkIdx * 3 + 1] = ((dctBlock[sblkIdx * 32 + 15]) * (dctBlock[sblkIdx * 32 + 15]) + (dctBlock[sblkIdx * 32 + 20]) * (dctBlock[sblkIdx * 32 + 20]) +
+			(dctBlock[sblkIdx * 32 + 11]) * (dctBlock[sblkIdx * 32 + 11]) + (dctBlock[sblkIdx * 32 + 16]) * (dctBlock[sblkIdx * 32 + 16]) + \
+			(dctBlock[sblkIdx * 32 + 21]) * (dctBlock[sblkIdx * 32 + 21]) +	(dctBlock[sblkIdx * 32 + 7]) * (dctBlock[sblkIdx * 32 + 7]) + \
+			(dctBlock[sblkIdx * 32 + 12]) * (dctBlock[sblkIdx * 32 + 12]) + (dctBlock[sblkIdx * 32 + 17]) * (dctBlock[sblkIdx * 32 + 17]) + \
+			(dctBlock[sblkIdx * 32 + 3]) * (dctBlock[sblkIdx * 32 + 3]) + (dctBlock[sblkIdx * 32 + 8]) * (dctBlock[sblkIdx * 32 + 8]) + \
+			(dctBlock[sblkIdx * 32 + 13]) * (dctBlock[sblkIdx * 32 + 13]) + (dctBlock[sblkIdx * 32 + 4]) * (dctBlock[sblkIdx * 32 + 4]) + \
+			(dctBlock[sblkIdx * 32 + 9]) * (dctBlock[sblkIdx * 32 + 9])) / 12.0;
+		dctBlock[sblkIdx * 32 + x] += mean;*/
+		inter[sblkIdx * 3 + 1] = ((dctBlock[sblkIdx * 32 + 15] - mean2) * (dctBlock[sblkIdx * 32 + 15] - mean2) + (dctBlock[sblkIdx * 32 + 20] - mean2) * \
+			(dctBlock[sblkIdx * 32 + 20] - mean2) + (dctBlock[sblkIdx * 32 + 11] - mean2) * (dctBlock[sblkIdx * 32 + 11] - mean2) + (dctBlock[sblkIdx * 32 + 16] - mean2) * \
+			(dctBlock[sblkIdx * 32 + 16] - mean2) + (dctBlock[sblkIdx * 32 + 21] - mean2) * (dctBlock[sblkIdx * 32 + 21] - mean2) + (dctBlock[sblkIdx * 32 + 7] - mean2) * \
+			(dctBlock[sblkIdx * 32 + 7] - mean2) + (dctBlock[sblkIdx * 32 + 12] - mean2) * (dctBlock[sblkIdx * 32 + 12] - mean2) + (dctBlock[sblkIdx * 32 + 17] - mean2) * \
+			(dctBlock[sblkIdx * 32 + 17] - mean2) + (dctBlock[sblkIdx * 32 + 3] - mean2) * (dctBlock[sblkIdx * 32 + 3] - mean2) + (dctBlock[sblkIdx * 32 + 8] - mean2) * \
+			(dctBlock[sblkIdx * 32 + 8] - mean2) + (dctBlock[sblkIdx * 32 + 13] - mean2) * (dctBlock[sblkIdx * 32 + 13] - mean2) + (dctBlock[sblkIdx * 32 + 4] - mean2) * \
+			(dctBlock[sblkIdx * 32 + 4] - mean2) + (dctBlock[sblkIdx * 32 + 9] - mean2) * (dctBlock[sblkIdx * 32 + 9] - mean2)) / 12.0f;
+	//}
+	//if (x == 2) {
+		const float mean3 = (dctBlock[sblkIdx * 32 + 14] + dctBlock[sblkIdx * 32 + 18] + dctBlock[sblkIdx * 32 + 22] + dctBlock[sblkIdx * 32 + 19] + \
+			dctBlock[sblkIdx * 32 + 23] + dctBlock[sblkIdx * 32 + 24]) / 6.0f;
+		/*dctBlock[sblkIdx * 32 + x] -= mean;
+		inter[sblkIdx * 3 + 2] = ((dctBlock[sblkIdx * 32 + 14]) * (dctBlock[sblkIdx * 32 + 14]) + (dctBlock[sblkIdx * 32 + 18]) * (dctBlock[sblkIdx * 32 + 18]) +
+			(dctBlock[sblkIdx * 32 + 22]) * (dctBlock[sblkIdx * 32 + 22]) + (dctBlock[sblkIdx * 32 + 19]) * (dctBlock[sblkIdx * 32 + 19]) +
+			(dctBlock[sblkIdx * 32 + 23]) * (dctBlock[sblkIdx * 32 + 23]) + (dctBlock[sblkIdx * 32 + 24]) * (dctBlock[sblkIdx * 32 + 24])) / 5.0;
+		//dctBlock[sblkIdx * 32 + x] += mean;
+		const double mean = (dctBlock[sblkIdx * 32 + 14] + dctBlock[sblkIdx * 32 + 18] + dctBlock[sblkIdx * 32 + 22] + dctBlock[sblkIdx * 32 + 19] + \
+			dctBlock[sblkIdx * 32 + 23] + dctBlock[sblkIdx * 32 + 24]) / 6.0;*/
+		inter[sblkIdx * 3 + 2] = ((dctBlock[sblkIdx * 32 + 14] - mean3) * (dctBlock[sblkIdx * 32 + 14] - mean3) + (dctBlock[sblkIdx * 32 + 18] - mean3) * \
+			(dctBlock[sblkIdx * 32 + 18] - mean3) + (dctBlock[sblkIdx * 32 + 22] - mean3) * (dctBlock[sblkIdx * 32 + 22] - mean3) + (dctBlock[sblkIdx * 32 + 19] - mean3) * \
+			(dctBlock[sblkIdx * 32 + 19] - mean3) + (dctBlock[sblkIdx * 32 + 23] - mean3) * (dctBlock[sblkIdx * 32 + 23] - mean3) + (dctBlock[sblkIdx * 32 + 24] - mean3) * \
+			(dctBlock[sblkIdx * 32 + 24] - mean3)) / 5.0f;
+	//}
 	//__syncthreads();
-	if (x == 0) {
-		const double r1 = fabsf(inter[sblkIdx * 3 + 2] - (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0) / \
-			(inter[sblkIdx * 3 + 2] + (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0 + 0.00000001);
-		const double r2 = fabsf(inter[sblkIdx * 3 + 1] - inter[sblkIdx * 3 + 0]) / (inter[sblkIdx * 3 + 2] + inter[sblkIdx * 3 + 0] + 0.00000001);
-		freq_bands[gblkIdx / 25] = (r1 + r2) / 2.0;
-	}
+	//if (x == 0) {
+		const float r1 = fabs(inter[sblkIdx * 3 + 2] - (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0f) / \
+			(inter[sblkIdx * 3 + 2] + (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0f + 0.00000001f);
+		const float r2 = fabs(inter[sblkIdx * 3 + 1] - inter[sblkIdx * 3 + 0]) / (inter[sblkIdx * 3 + 2] + inter[sblkIdx * 3 + 0] + 0.00000001f);
+		freq_bands[gblkIdx / 32] = (r1 + r2) / 2.0f;
+	//}
 	/*if (gblkIdx + x == 200) {
 		printf("inter[0] = %f\ninter[1] = %f\ninter[2] = %f\n", inter[sblkIdx * 3], inter[sblkIdx + 1], inter[sblkIdx + 2]);
 	}*/
+}
+
+// Specialized warps for each subband does not do well :(
+__global__ void subband_energy3(const float * d_dctImg, float * freq_bands) {
+	//plan grids = (512/3 + 1)^2, threads = 25
+	int const x = threadIdx.x % 32;
+	int const y = blockIdx.x * 4;
+	int const sblkIdx = threadIdx.x / 96;
+	int const gblkIdx = (y + sblkIdx) * 25;
+
+	__shared__ float dctBlock[32 * 4];
+	__shared__ float inter[3 * 4];
+	dctBlock[sblkIdx * 32 + x] = d_dctImg[gblkIdx + x];
+	//__syncthreads();
+	float mean;
+	if (threadIdx.x / 32 % 3 == 0) {
+		mean = (dctBlock[sblkIdx * 32 + 1] + dctBlock[sblkIdx * 32 + 2] + dctBlock[sblkIdx * 32 + 5] + \
+			dctBlock[sblkIdx * 32 + 6] + dctBlock[sblkIdx * 32 + 10]) / 5.0f;
+		inter[sblkIdx * 3 + 0] = ((dctBlock[sblkIdx * 32 + 1] - mean) * (dctBlock[sblkIdx * 32 + 1] - mean) + (dctBlock[sblkIdx * 32 + 2] - mean) * (dctBlock[sblkIdx * 32 + 2] - mean) +
+			(dctBlock[sblkIdx * 32 + 5] - mean) * (dctBlock[sblkIdx * 32 + 5] - mean) + (dctBlock[sblkIdx * 32 + 6] - mean) * (dctBlock[sblkIdx * 32 + 6] - mean) + \
+			(dctBlock[sblkIdx * 32 + 10] - mean) * (dctBlock[sblkIdx * 32 + 10] - mean)) / 4.0f;
+	}
+	if (threadIdx.x / 32 % 3 == 1) {
+		/*const double*/ mean = (dctBlock[sblkIdx * 32 + 15] + dctBlock[sblkIdx * 32 + 20] + dctBlock[sblkIdx * 32 + 11] + \
+			dctBlock[sblkIdx * 32 + 16] + dctBlock[sblkIdx * 32 + 21] + dctBlock[sblkIdx * 32 + 7] + dctBlock[sblkIdx * 32 + 12] + \
+			dctBlock[sblkIdx * 32 + 17] + dctBlock[sblkIdx * 32 + 3] + dctBlock[sblkIdx * 32 + 8] + dctBlock[sblkIdx * 32 + 13] + \
+			dctBlock[sblkIdx * 32 + 4] + dctBlock[sblkIdx * 32 + 9]) / 13.0f;
+		inter[sblkIdx * 3 + 1] = ((dctBlock[sblkIdx * 32 + 15] - mean) * (dctBlock[sblkIdx * 32 + 15] - mean) + (dctBlock[sblkIdx * 32 + 20] - mean) * (dctBlock[sblkIdx * 32 + 20] - mean) +
+		(dctBlock[sblkIdx * 32 + 11] - mean) * (dctBlock[sblkIdx * 32 + 11] - mean) + (dctBlock[sblkIdx * 32 + 16] - mean) * (dctBlock[sblkIdx * 32 + 16] - mean) + (dctBlock[sblkIdx * 32 + 21] - mean) * (dctBlock[sblkIdx * 32 + 21] - mean) +
+		(dctBlock[sblkIdx * 32 + 7] - mean) * (dctBlock[sblkIdx * 32 + 7] - mean) + (dctBlock[sblkIdx * 32 + 12] - mean) * (dctBlock[sblkIdx * 32 + 12] - mean) +
+		(dctBlock[sblkIdx * 32 + 17] - mean) * (dctBlock[sblkIdx * 32 + 17] - mean) + (dctBlock[sblkIdx * 32 + 3] - mean) * (dctBlock[sblkIdx * 32 + 3] - mean) + \
+		(dctBlock[sblkIdx * 32 + 8] - mean) * (dctBlock[sblkIdx * 32 + 8] - mean) +
+		(dctBlock[sblkIdx * 32 + 13] - mean) * (dctBlock[sblkIdx * 32 + 13] - mean) + (dctBlock[sblkIdx * 32 + 4] - mean) * (dctBlock[sblkIdx * 32 + 4] - mean) +
+		(dctBlock[sblkIdx * 32 + 9] - mean) * (dctBlock[sblkIdx * 32 + 9] - mean)) / 12.0f;
+	}
+	if (threadIdx.x / 32 % 3 == 2) {
+		mean = (dctBlock[sblkIdx * 32 + 14] + dctBlock[sblkIdx * 32 + 18] + dctBlock[sblkIdx * 32 + 22] + dctBlock[sblkIdx * 32 + 19] + \
+			dctBlock[sblkIdx * 32 + 23] + dctBlock[sblkIdx * 32 + 24]) / 6.0f;
+		inter[sblkIdx * 3 + 2] = ((dctBlock[sblkIdx * 32 + 14] - mean) * (dctBlock[sblkIdx * 32 + 14] - mean) + (dctBlock[sblkIdx * 32 + 18] - mean) * (dctBlock[sblkIdx * 32 + 18] - mean) +
+			(dctBlock[sblkIdx * 32 + 22] - mean) * (dctBlock[sblkIdx * 32 + 22] - mean) + (dctBlock[sblkIdx * 32 + 19] - mean) * (dctBlock[sblkIdx * 32 + 19] - mean) +
+			(dctBlock[sblkIdx * 32 + 23] - mean) * (dctBlock[sblkIdx * 32 + 23] - mean) + (dctBlock[sblkIdx * 32 + 24] - mean) * (dctBlock[sblkIdx * 32 + 24] - mean)) / 5.0f;
+	}
+	__syncthreads();
+	if (threadIdx.x / 32 % 3 == 1) {
+		const float r1 = fabsf(inter[sblkIdx * 3 + 2] - (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0f) / \
+			(inter[sblkIdx * 3 + 2] + (inter[sblkIdx * 3 + 0] + inter[sblkIdx * 3 + 1]) / 2.0f + 0.00000001f);
+		const float r2 = fabsf(inter[sblkIdx * 3 + 1] - inter[sblkIdx * 3 + 0]) / (inter[sblkIdx * 3 + 2] + inter[sblkIdx * 3 + 0] + 0.00000001f);
+		freq_bands[gblkIdx / 25] = (r1 + r2) / 2.0f;
+	}
 }
 
 __global__ void mean_100(float * d_input, float * d_mean_array, int num_elements) {
@@ -913,10 +1171,11 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	float * d_g_info;											cudaMalloc((void **)&d_g_info, 9971 * sizeof(float));
 	float * d_r_info;											cudaMalloc((void **)&d_r_info, 9971 * sizeof(float));
 	float *d_in_pad;											cudaMalloc((void **)&d_in_pad, 517 * 517 * sizeof(float));
-	cufftComplex *d_rearr_in;									cudaMalloc((void **)&d_rearr_in, 50 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(cufftComplex));
+	/*cufftComplex *d_rearr_in;									cudaMalloc((void **)&d_rearr_in, 50 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(cufftComplex));
 	cufftComplex *d_dct_inter;									cudaMalloc((void **)&d_dct_inter, 50 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(cufftComplex));
 	cufftComplex *d_dct_in;										cudaMalloc((void **)&d_dct_in, 50 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(cufftComplex));
-	float * d_dctImg;											cudaMalloc((void **)&d_dctImg, (512 / 3 + 1) * (512 / 3 + 1) * 25 * sizeof(float));
+	*/
+	float * d_dctImg;											cudaMalloc((void **)&d_dctImg, (512 / 3 + 1) * (512 / 3 + 1) * 32 * sizeof(float));
 	float * d_coeff_freq_var_L1;								cudaMalloc((void **)&d_coeff_freq_var_L1, (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float));
 	float * d_ori1_rho_L1;										cudaMalloc((void **)&d_ori1_rho_L1, (512 / 3 + 1) * (512 / 3 + 1)  * sizeof(float));
 	float * d_ori2_rho_L1;										cudaMalloc((void **)&d_ori2_rho_L1, (512 / 3 + 1) * (512 / 3 + 1)  * sizeof(float));
@@ -960,22 +1219,51 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	//float * h_dctImg = (float*)malloc((512 / 3 + 1) * (512 / 3 + 1) * sizeof(float));
 	//cudaMemcpy(h_dctImg, d_dctImg, (512 / 3 + 1) * (512 / 3 + 1) * 25 * sizeof(float), cudaMemcpyDeviceToHost);
 	
-	float* d_rearr_man;											cudaMalloc((void **)&d_rearr_man, 25 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float));
-	double* d_dctmtx;											cudaMalloc((void **)&d_dctmtx, 25 * sizeof(double));
+	float* d_rearr_man;											cudaMalloc((void **)&d_rearr_man, 32 * (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float));
+	cudaMemset(d_rearr_man, 0, 32 * square * sizeof(float));
+	cudaMemset(d_dctImg, 0, 32 * square * sizeof(float));
+	double* d_dctmtx;											cudaMalloc((void **)&d_dctmtx, 32 * sizeof(double));
+	cudaMemset(d_dctmtx, 0, 32 * sizeof(double));
 	cudaMemcpy(d_dctmtx, dct2_55::dctmtx_5, 25 * sizeof(double), cudaMemcpyHostToDevice);
-	rearrangeForDCT << <square, 25 >> >(d_in_pad, 512, d_rearr_man);
-	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);	
+	//float* h_dctImg = (float *)malloc(32 * square*sizeof(float));
+	
+	/*for (int i = 517; i < 517+32; i++) {
+		std::cout << h_dctImg[i] << "\t";
+		if ((i + 1) % 5 == 0)
+			std::cout << std::endl;
+	}*/
+	//rearrangeForDCTv2 << <square / 4 + 1, 128 >> >(d_in_pad, 512, d_rearr_man);
+	/*cudaDeviceSynchronize();
+	cudaError_t error = cudaGetLastError();
+	if (error != cudaSuccess)
+	{
+		fprintf(stderr, "ERROR1: %s\n", cudaGetErrorString(error));
+		exit(-1);
+	}*/
+	rearrangeAndDCT55 << <square / 8 + 1, 256 >> >(d_in_pad, 512, d_dctmtx, d_dctImg);
+	/*cudaDeviceSynchronize();
+	error = cudaGetLastError();
+	//cudaMemcpy(h_dctImg, d_dctImg, 32 * square * sizeof(float), cudaMemcpyDeviceToHost);
+	if (error != cudaSuccess)
+	{
+		fprintf(stderr, "ERROR2: %s\n", cudaGetErrorString(error));
+		exit(-1);
+	}*/
 
-	rho_dct << <square, 25 >> >(d_dctImg, d_coeff_freq_var_L1);
+//#ifdef EBM
+	cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
+//#endif
+	rho_dct2 << <square / 16 + 1, 512 >> >(d_dctImg, d_coeff_freq_var_L1);
 	//thrust::device_ptr<float> keys(d_coeff_freq_var_L1);
 	thrust::sort(thrust::device, d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square);
+	//thrust::host_vector<float> h_coeff_freq_L1(d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square);
 	int mean10_size = ceil((square) / 10.0);
 	features[0] = thrust::reduce(thrust::device, d_coeff_freq_var_L1, d_coeff_freq_var_L1 + square) / square;
 	features[1] = thrust::reduce(thrust::device, d_coeff_freq_var_L1 + square - mean10_size, d_coeff_freq_var_L1 + square) / mean10_size;
 
-	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L1);
+	gama_dct62 << <square / 16 + 1, 512 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L1);
 	thrust::sort(thrust::device, d_gama_L1, d_gama_L1 + square);
-	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L1, d_g_info, d_r_info, d_gama_L1, square);
+	gama_dct6_3 << <square / 128 + 1, 128 >> >(d_gama_L1, d_g_info, d_r_info, d_gama_L1, square);
 	features[2] = thrust::reduce(thrust::device, d_gama_L1, d_gama_L1 + square) / square;
 	features[3] = thrust::reduce(thrust::device, d_gama_L1 + square - mean10_size, d_gama_L1 + square) / mean10_size;
 
@@ -1003,11 +1291,13 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	thrust::sort(thrust::device, d_ori_rho_L1, d_ori_rho_L1 + square);
 	features[6] = thrust::reduce(thrust::device, d_ori_rho_L1, d_ori_rho_L1 + square) / square;
 	features[7] = thrust::reduce(thrust::device, d_ori_rho_L1 + square - mean10_size, d_ori_rho_L1 + square) / mean10_size;
+	//std::cout << "or_rho_dct done\n";
 
-	subband_energy2 << <square / 8 + 1, 256 >> >(d_dctImg, d_freq_bands);
+	subband_energy2 << <square / 4 + 1, 128 >> >(d_dctImg, d_freq_bands);
 	thrust::sort(thrust::device, d_freq_bands, d_freq_bands + square);
 	features[4] = thrust::reduce(thrust::device, d_freq_bands, d_freq_bands + square) / square;
 	features[5] = thrust::reduce(thrust::device, d_freq_bands + square - mean10_size, d_freq_bands + square) / mean10_size;
+	//std::cout << "subband done\n";
 
 	//cudaMemcpy(h_dctImg, d_gama_L1, (512 / 3 + 1) * (512 / 3 + 1) * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -1085,25 +1375,26 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	copyDCT << <square, 25 >> >(d_dct_in, d_dctImg);
 	cudaDeviceSynchronize();
 	*/
-	rearrangeForDCT << <square, 25 >> >(d_in_pad_L2, 256, d_rearr_man);
-	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);
+	//std::cout << "phase 1 done \n";
+	//rearrangeForDCTv2 << <square / 4 + 1, 128 >> >(d_in_pad_L2, 256, d_rearr_man);
+	rearrangeAndDCT55 << <square / 8 + 1, 256 >> >(d_in_pad_L2, 256, d_dctmtx, d_dctImg);
 
 	//h_dctImg = (float*)malloc(25 * square * sizeof(float));
-
-	rho_dct << <square, 25 >> >(d_dctImg, d_coeff_freq_var_L2);
+	//std::cout << "second dct\n";
+	rho_dct2 << <square / 16 + 1, 512 >> >(d_dctImg, d_coeff_freq_var_L2);
 	thrust::sort(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square);
 	mean10_size = ceil((square) / 10.0);
 	features[9] = thrust::reduce(thrust::device, d_coeff_freq_var_L2 + square - mean10_size, d_coeff_freq_var_L2 + square) / mean10_size;
 	features[8] = thrust::reduce(thrust::device, d_coeff_freq_var_L2, d_coeff_freq_var_L2 + square) / square;
 
-	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
+	gama_dct62 << <square / 16 + 1, 512 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
 	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L2);
 	thrust::sort(thrust::device, d_gama_L2, d_gama_L2 + square);
-	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L2, d_g_info, d_r_info, d_gama_L2, square);
+	gama_dct6_3 << <square / 128 + 1, 128 >> >(d_gama_L2, d_g_info, d_r_info, d_gama_L2, square);
 	features[11] = thrust::reduce(thrust::device, d_gama_L2 + square - mean10_size, d_gama_L2 + square) / mean10_size;
 	features[10] = thrust::reduce(thrust::device, d_gama_L2, d_gama_L2 + square) / square;
 
-	subband_energy2 << <square / 8 + 1, 256 >> >(d_dctImg, d_freq_bands_L2);
+	subband_energy2 << <square / 4 + 1, 128 >> >(d_dctImg, d_freq_bands_L2);
 	thrust::sort(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square);
 	features[13] = thrust::reduce(thrust::device, d_freq_bands_L2 + square - mean10_size, d_freq_bands_L2 + square) / mean10_size;
 	features[12] = thrust::reduce(thrust::device, d_freq_bands_L2, d_freq_bands_L2 + square) / square;
@@ -1199,25 +1490,25 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 	copyDCT << <square, 25 >> >(d_dct_in, d_dctImg);
 	cudaDeviceSynchronize();
 	*/
-	rearrangeForDCT << <square, 25 >> >(d_in_pad_L3, 128, d_rearr_man);
-	dct55 << <square, 25 >> >(d_rearr_man, d_dctmtx, d_dctImg);
+	//rearrangeForDCTv2 << <square / 4 + 1, 128 >> >(d_in_pad_L3, 128, d_rearr_man);
+	rearrangeAndDCT55 << <square / 8 + 1, 256 >> >(d_in_pad_L3, 128, d_dctmtx, d_dctImg);
 	cudaFree(d_dctmtx);
 
-	rho_dct << <square, 25 >> >(d_dctImg, d_coeff_freq_var_L3);
+	rho_dct2 << <square / 16 + 1, 512 >> >(d_dctImg, d_coeff_freq_var_L3);
 	thrust::sort(thrust::device, d_coeff_freq_var_L3, d_coeff_freq_var_L3 + square);
 	mean10_size = ceil((square) / 10.0);
 	features[17] = thrust::reduce(thrust::device, d_coeff_freq_var_L3 + square - mean10_size, d_coeff_freq_var_L3 + square) / mean10_size;
 	features[16] = thrust::reduce(thrust::device, d_coeff_freq_var_L3, d_coeff_freq_var_L3 + square) / square;
 
-	gama_dct6 << <square, 25 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
+	gama_dct62 << <square / 16 + 1, 512 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
 	//gama_dct5 << <square, 1024 >> >(d_dctImg, d_g_info, d_r_info, d_gama_L3);
 	thrust::sort(thrust::device, d_gama_L3, d_gama_L3 + square);
-	gama_dct6_3 << <square / 1024 + 1, 1024 >> >(d_gama_L3, d_g_info, d_r_info, d_gama_L3, square);
+	gama_dct6_3 << <square / 128 + 1, 128 >> >(d_gama_L3, d_g_info, d_r_info, d_gama_L3, square);
 	features[19] = thrust::reduce(thrust::device, d_gama_L3 + square - mean10_size, d_gama_L3 + square) / mean10_size;
 	features[18] = thrust::reduce(thrust::device, d_gama_L3, d_gama_L3 + square) / square;
 
 	// square = 1849
-	subband_energy2 << <square / 8 + 1, 256 >> >(d_dctImg, d_freq_bands_L3);
+	subband_energy2 << <square / 4 + 1, 128 >> >(d_dctImg, d_freq_bands_L3);
 	thrust::sort(thrust::device, d_freq_bands_L3, d_freq_bands_L3 + square);
 	features[21] = thrust::reduce(thrust::device, d_freq_bands_L3 + square - mean10_size, d_freq_bands_L3 + square) / mean10_size;
 	features[20] = thrust::reduce(thrust::device, d_freq_bands_L3, d_freq_bands_L3 + square) / square;
@@ -1311,7 +1602,6 @@ void kernel_wrapper(const cv::Mat &Mat_in)
 		}
 	}
 	std::cout << "BLIINDS score: " << max_k << std::endl;
-
 	// stop timer
 	QueryPerformanceCounter(&t2);
 

@@ -18,6 +18,7 @@
 //=============================================================================
 #include <cufft.h>
 #include <thrust/execution_policy.h>
+#include <thrust\host_vector.h>
 #include <thrust/reduce.h>
 #include <thrust\sort.h>
 //=============================================================================
